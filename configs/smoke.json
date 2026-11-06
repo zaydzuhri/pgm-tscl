@@ -6,7 +6,6 @@
   "max_len": 256,
   "total_steps": 4,
   "batch_size": 2,
-  "grad_accum": 1,
   "lr": 1e-05,
   "warmup_ratio": 0.03,
   "teacher_interval": 2,

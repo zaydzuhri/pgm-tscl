@@ -22,7 +22,7 @@ This gives a doubly nested loop:
         o_t = observe(student) ; teacher.update(o_t)        # teacher learns from the score change
 
 Fair comparison: every run, whatever its teacher, uses the same number of training examples
-(total_steps x batch_size x grad_accum), the same LR schedule and the same test-eval steps. Only the
+(total_steps x batch_size), the same LR schedule and the same test-eval steps. Only the
 mix of buckets in each batch differs. Ordinary finetuning is just the `proportional` teacher, which
 never changes its distribution. The teacher's extra cost (val forward passes) is logged separately
 as `teacher_eval_examples`.
@@ -61,8 +61,7 @@ class Config:
     always_score: bool = False          # also score baselines each round (only for plotting learning curves)
     # --- Training budget (keep these identical across runs you compare) ---
     total_steps: int = 500              # total optimizer steps
-    batch_size: int = 4                 # micro-batch size
-    grad_accum: int = 8                 # examples per optimizer step = batch_size * grad_accum
+    batch_size: int = 32                # examples per optimizer step (use grad_ckpt if memory is tight)
     lr: float = 1e-5
     warmup_ratio: float = 0.03
     weight_decay: float = 0.0
@@ -129,7 +128,7 @@ def load_model(cfg, device):
 def forward_loss(model, batch):
     """Next-token cross-entropy on the solution tokens only.
 
-    Returns (sum of token losses over the batch, mean loss of each example). The per-example losses
+    Returns (mean token loss over the batch, mean loss of each example). The per-example losses
     let us track the loss of each bucket. To save memory, logits are only computed at positions that
     have a label.
     """
@@ -141,7 +140,7 @@ def forward_loss(model, batch):
     token_loss = F.cross_entropy(logits, labels[has_label], reduction="none")
     example_of_token = has_label.nonzero()[:, 0]
     loss_sum_per_example = torch.zeros(labels.shape[0], device=hidden.device).index_add_(0, example_of_token, token_loss)
-    return token_loss.sum(), loss_sum_per_example / has_label.sum(1).clamp(min=1)
+    return token_loss.mean(), loss_sum_per_example / has_label.sum(1).clamp(min=1)
 
 
 def to_device(batch, device):
@@ -297,32 +296,27 @@ def main():
         # ===== INNER LOOP: the Student trains for `teacher_interval` optimizer steps on batches drawn from a_t =====
         for _ in range(min(cfg.teacher_interval, cfg.total_steps - step)):
             # Sample which task each example comes from (according to a_t), then take examples from those buckets.
-            batch = sampler.sample(task_probs, cfg.batch_size * cfg.grad_accum)
-            micro_batches = [to_device(data.collate(batch[i:i + cfg.batch_size], tok.pad_token_id), device)
-                             for i in range(0, len(batch), cfg.batch_size)]
+            batch = to_device(data.collate(sampler.sample(task_probs, cfg.batch_size), tok.pad_token_id), device)
 
-            # Standard gradient step (with gradient accumulation). The loss is averaged over every
-            # solution token in the full batch.
-            n_tok = sum(int((mb["labels"][:, 1:] != -100).sum()) for mb in micro_batches)
-            loss_sum = 0.0
-            for mb in micro_batches:
-                with amp:
-                    token_loss_sum, example_losses = forward_loss(model, mb)
-                (token_loss_sum / n_tok).backward()
-                loss_sum += token_loss_sum.item()
-                task_ids = mb["bucket"].cpu().numpy()
-                np.add.at(round_loss_sum, task_ids, example_losses.detach().float().cpu().numpy())
-                np.add.at(round_count, task_ids, 1)
+            # From here on it is a normal finetuning step.
+            with amp:
+                loss, example_losses = forward_loss(model, batch)
+            loss.backward()
             gnorm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
             opt.step()
             sched.step()
             opt.zero_grad(set_to_none=True)
 
+            # Bookkeeping: per-task training loss for this round.
+            task_ids = batch["bucket"].cpu().numpy()
+            np.add.at(round_loss_sum, task_ids, example_losses.detach().float().cpu().numpy())
+            np.add.at(round_count, task_ids, 1)
+
             step += 1
-            examples += len(batch)
-            tokens += n_tok
+            examples += cfg.batch_size
+            tokens += int((batch["labels"] != -100).sum())
             if step % cfg.log_every == 0:
-                loss = loss_sum / n_tok
+                loss = loss.item()
                 log("train", **counters(), loss=loss, grad_norm=float(gnorm), lr=sched.get_last_lr()[0])
                 print(f"step {step}/{cfg.total_steps} loss={loss:.4f} lr={sched.get_last_lr()[0]:.2e} "
                       f"task_probs={np.round(task_probs, 3).tolist()} ({(time.time() - t0) / step:.2f}s/step)")

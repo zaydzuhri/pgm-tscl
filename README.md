@@ -49,7 +49,7 @@ to the paper but much slower. `train_loss` costs nothing extra but is noisier.
 
 Ordinary finetuning is just the `proportional` teacher (bucket probability ∝ bucket size, so it matches
 shuffled SFT). It therefore runs through exactly the same loop. To compare runs, keep these identical:
-`total_steps`, `batch_size`, `grad_accum`, `lr`, `warmup_ratio`, `eval_every`, `data_seed`.
+`total_steps`, `batch_size`, `lr`, `warmup_ratio`, `eval_every`, `data_seed`.
 Every run then trains on the same number of examples, uses the same LR schedule, and is evaluated at the same steps.
 `teacher_interval` only affects teachers that observe scores.
 
