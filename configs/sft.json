@@ -1,0 +1,18 @@
+{
+  "teacher": "proportional",
+  "model": "Qwen/Qwen3-0.6B",
+  "dataset": "math",
+  "bucket_by": "level",
+  "n_val_per_bucket": 32,
+  "max_len": 1024,
+  "total_steps": 500,
+  "batch_size": 4,
+  "grad_accum": 8,
+  "lr": 1e-05,
+  "warmup_ratio": 0.03,
+  "teacher_interval": 10,
+  "score": "val_loss",
+  "eval_every": 100,
+  "test_size": 500,
+  "seed": 0
+}

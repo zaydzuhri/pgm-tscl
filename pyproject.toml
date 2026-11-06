@@ -1,0 +1,15 @@
+[project]
+name = "pgm-tscl"
+version = "0.1.0"
+description = "Teacher-Student Curriculum Learning (Matiisen et al., 2017) for LLM finetuning on MATH"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.4",
+    "transformers>=4.51",  # Qwen3 support
+    "datasets>=3.0",
+    "numpy",
+    "math-verify>=0.7",    # answer equivalence checking for eval
+]
+
+[tool.uv]
+package = false

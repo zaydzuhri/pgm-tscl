@@ -1,0 +1,24 @@
+{
+  "model": "Qwen/Qwen3-0.6B",
+  "dataset": "math",
+  "bucket_by": "level",
+  "n_val_per_bucket": 2,
+  "max_len": 256,
+  "total_steps": 4,
+  "batch_size": 2,
+  "grad_accum": 1,
+  "lr": 1e-05,
+  "warmup_ratio": 0.03,
+  "teacher_interval": 2,
+  "score": "val_loss",
+  "eval_every": 4,
+  "test_size": 4,
+  "seed": 0,
+  "teacher": "window",
+  "teacher_kwargs": {
+    "K": 3
+  },
+  "gen_batch_size": 4,
+  "max_new_tokens": 32,
+  "log_every": 1
+}
