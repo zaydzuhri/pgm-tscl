@@ -15,7 +15,8 @@ uv run train.py --config configs/tscl_window.json --seed 1 --teacher_interval 20
 
 Logs go to `runs/<config>_s<seed>/log.jsonl`, with three record types:
 - `train`: loss and LR
-- `round`: the teacher's distribution, the per-bucket scores, and its Q values
+- `round`: the teacher's distribution, the per-bucket scores, its Q values, and per-bucket data usage
+  (`drawn` = total draws, `unique_seen` = distinct examples used, `refills` = times the bucket ran out and started repeating)
 - `eval`: MATH-500 accuracy, overall and per level/subject
 
 ## Files
@@ -34,16 +35,16 @@ We use the paper's **batch POMDP** (Sec 2.2, Appendix B), which is the formulati
 |---|---|
 | task *i* | a MATH bucket (`bucket_by`: `level` → 5 tasks, `subject` → 7, `level_subject` → 35) |
 | action *a_t* | a distribution over buckets; the next `teacher_interval` optimizer steps sample batches from it |
-| observation *o_t* | per-bucket score on a held-out val split carved out of MATH train (`n_val_per_bucket` per bucket) |
+| observation *o_t* | per-bucket accuracy (greedy decoding) on a held-out val split carved out of MATH train (`n_val_per_bucket` per bucket) |
 | reward *r_t* | score change *o_t − o_{t−1}* (Online, Sampling) or learning-curve slope (Naive, Window) |
 | final task | MATH-500 accuracy (reporting only; the teacher never sees it) |
 
 This makes training a doubly nested loop. The outer loop is the teacher's timesteps. The inner loop is
 `teacher_interval` ordinary optimizer steps.
 
-**Score choice (`score`)**: the paper uses validation accuracy. For an LLM that needs generation, which is
-slow, so the default is `val_loss` (−NLL of the reference solutions, one forward pass). `val_acc` is faithful
-to the paper but much slower. `train_loss` costs nothing extra but is noisier.
+**Cost of the observation**: as in the paper, the score is validation accuracy, which needs generation.
+Each teacher timestep generates N × `n_val_per_bucket` answers (160 with the defaults). This is the main
+overhead of TSCL over plain finetuning. Use `teacher_interval` and `n_val_per_bucket` to trade it off.
 
 ## Fair comparison
 
@@ -66,5 +67,5 @@ training data used. Note that equal steps does not mean equal tokens: Level 5 so
 | `window` | same as online + `K=10` (FIFO window of scores) |
 | `sampling` | `K=10, epsilon=0.1` |
 
-Boltzmann's `tau` depends on the scale of the scores. The paper's 4e-4 was tuned for accuracy and may not suit
-`val_loss`.
+Boltzmann's `tau` depends on the scale of the scores. The paper's 4e-4 was tuned for accuracy on 4096-example
+validation sets. Our val sets are much smaller, so scores are noisier and `tau` probably needs tuning.

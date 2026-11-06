@@ -10,7 +10,6 @@
   "lr": 1e-05,
   "warmup_ratio": 0.03,
   "teacher_interval": 10,
-  "score": "val_loss",
   "eval_every": 100,
   "test_size": 500,
   "seed": 0

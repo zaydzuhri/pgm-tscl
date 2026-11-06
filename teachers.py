@@ -5,13 +5,16 @@ We use the *batch* POMDP formulation (Sec 2.2 / Appendix B), the one suited to s
   action      a_t : a probability distribution over the N task buckets; the next
                     `teacher_interval` optimizer steps draw their batches from it.
   observation o_t : a vector of per-bucket scores measured after those steps
-                    (higher = better, e.g. -val_loss or val accuracy).
+                    (per-bucket validation accuracy).
   reward      r_t : the change in scores (Online/Sampling) or the slope of the
                     per-bucket learning curve (Naive/Window).
 
 Every teacher implements two methods:
-  distribution() -> np.ndarray[N]  the action for the next round
-  update(scores)                   observe o_t (the first call passes o_0, measured before training)
+  distribution() -> (N,) array     the action for the next round (non-negative, sums to 1)
+  update(scores)                   observe o_t, a (N,) array (the first call passes o_0, measured before training)
+
+Shapes: everything here is a numpy vector of shape (N,) (one entry per task: Q, scores, rewards,
+probabilities), except the regression buffers noted in _slopes.
 
 Baselines (no observation needed): `proportional` samples buckets by size, which is ordinary
 shuffled finetuning; `uniform` gives every bucket equal mass. To add a new teacher, subclass

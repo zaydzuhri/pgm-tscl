@@ -98,11 +98,15 @@ def encode(tokenizer, example, max_len, bucket):
 
 
 def collate(examples, pad_token_id):
-    """Right-pad a list of encoded examples into a batch of tensors."""
-    max_length = max(len(example["input_ids"]) for example in examples)
-    input_ids = torch.full((len(examples), max_length), pad_token_id, dtype=torch.long)
-    labels = torch.full((len(examples), max_length), -100, dtype=torch.long)
-    attention_mask = torch.zeros((len(examples), max_length), dtype=torch.long)
+    """Right-pad a list of encoded examples into a batch of tensors.
+
+    Shapes: B = len(examples), L = length of the longest example in the batch.
+    Output: input_ids, labels, attention_mask: (B, L) long;  bucket: (B,) long (task id of each example)
+    """
+    max_length = max(len(example["input_ids"]) for example in examples)                   # L
+    input_ids = torch.full((len(examples), max_length), pad_token_id, dtype=torch.long)  # (B, L)
+    labels = torch.full((len(examples), max_length), -100, dtype=torch.long)             # (B, L)
+    attention_mask = torch.zeros((len(examples), max_length), dtype=torch.long)          # (B, L)
     for row, example in enumerate(examples):
         length = len(example["input_ids"])
         input_ids[row, :length] = torch.tensor(example["input_ids"])
@@ -125,9 +129,12 @@ class BucketSampler:
         self.queues = [[] for _ in buckets]
         self.drawn = np.zeros(len(buckets), dtype=np.int64)    # total draws per bucket
         self.seen = [set() for _ in buckets]                   # unique examples seen per bucket
+        self.refills = np.zeros(len(buckets), dtype=np.int64)  # times each bucket ran out and started repeating
 
     def _next_example(self, bucket):
-        if not self.queues[bucket]:
+        if not self.queues[bucket]:  # queue empty: fill it with a fresh shuffled ordering of the bucket
+            if self.seen[bucket]:    # not the first fill, so every example has been used once: repetition starts
+                self.refills[bucket] += 1
             self.queues[bucket] = self.random_generator.permutation(len(self.buckets[bucket])).tolist()
         index = self.queues[bucket].pop()
         self.seen[bucket].add(index)
@@ -135,8 +142,8 @@ class BucketSampler:
 
     def sample(self, probs, batch_size):
         """Choose a bucket for each example according to `probs`, then take examples from those buckets."""
-        probs = np.asarray(probs, dtype=np.float64)
-        counts = self.random_generator.multinomial(batch_size, probs / probs.sum())
+        probs = np.asarray(probs, dtype=np.float64)                                  # (N,)
+        counts = self.random_generator.multinomial(batch_size, probs / probs.sum())  # (N,) examples per bucket, sums to batch_size
         batch = [self._next_example(bucket) for bucket, count in enumerate(counts) for _ in range(count)]
         self.random_generator.shuffle(batch)
         self.drawn += counts
