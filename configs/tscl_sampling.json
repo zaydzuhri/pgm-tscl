@@ -2,7 +2,7 @@
   "teacher": "sampling",
   "teacher_kwargs": {
     "K": 10,
-    "eps": 0.1
+    "epsilon": 0.1
   },
   "model": "Qwen/Qwen3-0.6B",
   "dataset": "math",

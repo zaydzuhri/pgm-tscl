@@ -4,7 +4,7 @@
     "K": 10,
     "alpha": 0.1,
     "policy": "greedy",
-    "eps": 0.1
+    "epsilon": 0.1
   },
   "model": "Qwen/Qwen3-0.6B",
   "dataset": "math",

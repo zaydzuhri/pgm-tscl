@@ -23,31 +23,31 @@ class TaskData:
     test: list    # flat list of examples
 
 
-def bucket_key(ex, bucket_by):
+def bucket_key(example, bucket_by):
     if bucket_by == "level":
-        return f"L{ex['level']}"
+        return f"L{example['level']}"
     if bucket_by == "subject":
-        return ex["subject"]
+        return example["subject"]
     if bucket_by == "level_subject":
-        return f"{ex['subject']}/L{ex['level']}"
+        return f"{example['subject']}/L{example['level']}"
     if bucket_by == "none":
         return "all"
     raise ValueError(f"unknown bucket_by={bucket_by}")
 
 
-def split_into_buckets(rows, test, bucket_by, n_val, data_seed=0):
+def split_into_buckets(train_rows, test_rows, bucket_by, n_val, data_seed=0):
     groups = {}
-    for r in rows:
-        groups.setdefault(bucket_key(r, bucket_by), []).append(r)
+    for row in train_rows:
+        groups.setdefault(bucket_key(row, bucket_by), []).append(row)
     names = sorted(groups)
-    rng = random.Random(data_seed)
+    random_generator = random.Random(data_seed)
     train, val = [], []
-    for k in names:
-        g = groups[k][:]
-        rng.shuffle(g)
-        val.append(g[:n_val])
-        train.append(g[n_val:])
-    return TaskData(names, train, val, test)
+    for name in names:
+        group = groups[name][:]
+        random_generator.shuffle(group)
+        val.append(group[:n_val])
+        train.append(group[n_val:])
+    return TaskData(names, train, val, test_rows)
 
 
 # ----------------------------------------------------------------------------- datasets
@@ -57,56 +57,59 @@ MATH_SUBJECTS = ["algebra", "counting_and_probability", "geometry", "intermediat
 
 def load_math(bucket_by="level", n_val=32, data_seed=0):
     """Hendrycks MATH train split (7.5k problems) bucketed by level and/or subject; MATH-500 as test set."""
-    rows = []
-    for subj in MATH_SUBJECTS:
-        for r in load_dataset("EleutherAI/hendrycks_math", subj, split="train"):
-            lvl = r["level"].replace("Level ", "")
-            ans = last_boxed(r["solution"])
-            if not lvl.isdigit() or ans is None:  # a handful are "Level ?" or have no \boxed answer
+    train_rows = []
+    for subject in MATH_SUBJECTS:
+        for row in load_dataset("EleutherAI/hendrycks_math", subject, split="train"):
+            level = row["level"].replace("Level ", "")
+            answer = last_boxed(row["solution"])
+            if not level.isdigit() or answer is None:  # a handful are "Level ?" or have no \boxed answer
                 continue
-            rows.append(dict(problem=r["problem"], solution=r["solution"], answer=ans,
-                             level=int(lvl), subject=r["type"]))
-    test = [dict(problem=r["problem"], solution=r["solution"], answer=r["answer"],
-                 level=int(r["level"]), subject=r["subject"])
-            for r in load_dataset("HuggingFaceH4/MATH-500", split="test")]
-    return split_into_buckets(rows, test, bucket_by, n_val, data_seed)
+            train_rows.append(dict(problem=row["problem"], solution=row["solution"], answer=answer,
+                                   level=int(level), subject=row["type"]))
+    test_rows = [dict(problem=row["problem"], solution=row["solution"], answer=row["answer"],
+                      level=int(row["level"]), subject=row["subject"])
+                 for row in load_dataset("HuggingFaceH4/MATH-500", split="test")]
+    return split_into_buckets(train_rows, test_rows, bucket_by, n_val, data_seed)
 
 
 DATASETS = {"math": load_math}
 
 
-def load_task_data(name, **kw) -> TaskData:
-    return DATASETS[name](**kw)
+def load_task_data(name, **kwargs) -> TaskData:
+    return DATASETS[name](**kwargs)
 
 
 # ----------------------------------------------------------------------------- tokenization
-def format_prompt(tok, problem):
-    msgs = [{"role": "user", "content": problem + PROMPT_SUFFIX}]
-    if tok.chat_template:
-        return tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True,
-                                       enable_thinking=False)
+def format_prompt(tokenizer, problem):
+    messages = [{"role": "user", "content": problem + PROMPT_SUFFIX}]
+    if tokenizer.chat_template:
+        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True,
+                                             enable_thinking=False)
     return f"Problem: {problem}{PROMPT_SUFFIX}\nSolution: "
 
 
-def encode(tok, ex, max_len, bucket):
+def encode(tokenizer, example, max_len, bucket):
     """Prompt tokens are masked out of the loss (-100); only the solution is trained on."""
-    p = tok(format_prompt(tok, ex["problem"]), add_special_tokens=False).input_ids
-    r = tok(ex["solution"] + tok.eos_token, add_special_tokens=False).input_ids
-    return dict(input_ids=(p + r)[:max_len], labels=([-100] * len(p) + r)[:max_len], bucket=bucket)
+    prompt_ids = tokenizer(format_prompt(tokenizer, example["problem"]), add_special_tokens=False).input_ids
+    solution_ids = tokenizer(example["solution"] + tokenizer.eos_token, add_special_tokens=False).input_ids
+    return dict(input_ids=(prompt_ids + solution_ids)[:max_len],
+                labels=([-100] * len(prompt_ids) + solution_ids)[:max_len],
+                bucket=bucket)
 
 
-def collate(exs, pad_id):
-    L = max(len(e["input_ids"]) for e in exs)
-    ids = torch.full((len(exs), L), pad_id, dtype=torch.long)
-    labels = torch.full((len(exs), L), -100, dtype=torch.long)
-    mask = torch.zeros((len(exs), L), dtype=torch.long)
-    for i, e in enumerate(exs):
-        n = len(e["input_ids"])
-        ids[i, :n] = torch.tensor(e["input_ids"])
-        labels[i, :n] = torch.tensor(e["labels"])
-        mask[i, :n] = 1
-    return dict(input_ids=ids, labels=labels, attention_mask=mask,
-                bucket=torch.tensor([e["bucket"] for e in exs]))
+def collate(examples, pad_token_id):
+    """Right-pad a list of encoded examples into a batch of tensors."""
+    max_length = max(len(example["input_ids"]) for example in examples)
+    input_ids = torch.full((len(examples), max_length), pad_token_id, dtype=torch.long)
+    labels = torch.full((len(examples), max_length), -100, dtype=torch.long)
+    attention_mask = torch.zeros((len(examples), max_length), dtype=torch.long)
+    for row, example in enumerate(examples):
+        length = len(example["input_ids"])
+        input_ids[row, :length] = torch.tensor(example["input_ids"])
+        labels[row, :length] = torch.tensor(example["labels"])
+        attention_mask[row, :length] = 1
+    return dict(input_ids=input_ids, labels=labels, attention_mask=attention_mask,
+                bucket=torch.tensor([example["bucket"] for example in examples]))
 
 
 class BucketSampler:
@@ -118,62 +121,64 @@ class BucketSampler:
 
     def __init__(self, buckets, seed=0):
         self.buckets = buckets
-        self.rng = np.random.default_rng(seed)
+        self.random_generator = np.random.default_rng(seed)
         self.queues = [[] for _ in buckets]
-        self.drawn = np.zeros(len(buckets), dtype=np.int64)   # total draws per bucket
-        self.seen = [set() for _ in buckets]                   # unique examples per bucket
+        self.drawn = np.zeros(len(buckets), dtype=np.int64)    # total draws per bucket
+        self.seen = [set() for _ in buckets]                   # unique examples seen per bucket
 
-    def _next(self, i):
-        if not self.queues[i]:
-            self.queues[i] = self.rng.permutation(len(self.buckets[i])).tolist()
-        j = self.queues[i].pop()
-        self.seen[i].add(j)
-        return self.buckets[i][j]
+    def _next_example(self, bucket):
+        if not self.queues[bucket]:
+            self.queues[bucket] = self.random_generator.permutation(len(self.buckets[bucket])).tolist()
+        index = self.queues[bucket].pop()
+        self.seen[bucket].add(index)
+        return self.buckets[bucket][index]
 
-    def sample(self, probs, n):
-        p = np.asarray(probs, dtype=np.float64)
-        counts = self.rng.multinomial(n, p / p.sum())
-        out = [self._next(i) for i, c in enumerate(counts) for _ in range(c)]
-        self.rng.shuffle(out)
+    def sample(self, probs, batch_size):
+        """Choose a bucket for each example according to `probs`, then take examples from those buckets."""
+        probs = np.asarray(probs, dtype=np.float64)
+        counts = self.random_generator.multinomial(batch_size, probs / probs.sum())
+        batch = [self._next_example(bucket) for bucket, count in enumerate(counts) for _ in range(count)]
+        self.random_generator.shuffle(batch)
         self.drawn += counts
-        return out
+        return batch
 
 
 # ----------------------------------------------------------------------------- answer checking
-def last_boxed(s):
-    """Return the contents of the last \\boxed{...} (or \\fbox{...}) in s, or None."""
-    idx = max(s.rfind("\\boxed"), s.rfind("\\fbox"))
-    if idx < 0:
+def last_boxed(text):
+    """Return the contents of the last \\boxed{...} (or \\fbox{...}) in text, or None."""
+    box_start = max(text.rfind("\\boxed"), text.rfind("\\fbox"))
+    if box_start < 0:
         return None
-    i = s.find("{", idx)
-    if i < 0:
+    open_brace = text.find("{", box_start)
+    if open_brace < 0:
         return None
     depth = 0
-    for j in range(i, len(s)):
-        depth += {"{": 1, "}": -1}.get(s[j], 0)
+    for position in range(open_brace, len(text)):
+        depth += {"{": 1, "}": -1}.get(text[position], 0)
         if depth == 0:
-            return s[i + 1:j]
+            return text[open_brace + 1:position]
     return None
 
 
-def _norm(s):
-    for a, b in [("\\left", ""), ("\\right", ""), ("\\!", ""), ("\\,", ""), ("\\;", ""),
-                 ("dfrac", "frac"), ("tfrac", "frac"), ("^\\circ", ""), ("^{\\circ}", ""),
-                 ("\\$", ""), ("$", ""), ("\\%", ""), ("%", "")]:
-        s = s.replace(a, b)
-    s = re.sub(r"\\(?:text|mbox|mathrm)\{(.*?)\}", r"\1", s)
-    s = s.replace(" ", "").rstrip(".")
-    return re.sub(r"^[a-zA-Z]=", "", s)
+def _normalize_answer(answer):
+    for old, new in [("\\left", ""), ("\\right", ""), ("\\!", ""), ("\\,", ""), ("\\;", ""),
+                     ("dfrac", "frac"), ("tfrac", "frac"), ("^\\circ", ""), ("^{\\circ}", ""),
+                     ("\\$", ""), ("$", ""), ("\\%", ""), ("%", "")]:
+        answer = answer.replace(old, new)
+    answer = re.sub(r"\\(?:text|mbox|mathrm)\{(.*?)\}", r"\1", answer)
+    answer = answer.replace(" ", "").rstrip(".")
+    return re.sub(r"^[a-zA-Z]=", "", answer)
 
 
-def is_correct(completion, gold):
-    pred = last_boxed(completion)
-    if pred is None:
+def is_correct(completion, gold_answer):
+    """Exact match after normalization, falling back to math_verify's symbolic equivalence check."""
+    predicted_answer = last_boxed(completion)
+    if predicted_answer is None:
         return False
-    if _norm(pred) == _norm(gold):
+    if _normalize_answer(predicted_answer) == _normalize_answer(gold_answer):
         return True
     try:
         from math_verify import parse, verify
-        return bool(verify(parse("\\boxed{" + gold + "}"), parse("\\boxed{" + pred + "}")))
+        return bool(verify(parse("\\boxed{" + gold_answer + "}"), parse("\\boxed{" + predicted_answer + "}")))
     except Exception:
         return False

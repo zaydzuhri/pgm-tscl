@@ -61,10 +61,10 @@ training data used. Note that equal steps does not mean equal tokens: Level 5 so
 | name | kwargs (defaults) |
 |---|---|
 | `proportional`, `uniform` | — |
-| `online` | `alpha=0.1, policy="greedy"\|"boltzmann", eps=0.1, tau=4e-4, use_abs=True` |
+| `online` | `alpha=0.1, policy="greedy"\|"boltzmann", epsilon=0.1, tau=4e-4, use_abs=True` |
 | `naive` | same as online + `K=5` (hold one distribution for K rounds) |
 | `window` | same as online + `K=10` (FIFO window of scores) |
-| `sampling` | `K=10, eps=0.1` |
+| `sampling` | `K=10, epsilon=0.1` |
 
 Boltzmann's `tau` depends on the scale of the scores. The paper's 4e-4 was tuned for accuracy and may not suit
 `val_loss`.
