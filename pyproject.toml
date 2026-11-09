@@ -9,6 +9,7 @@ dependencies = [
     "datasets>=3.0",
     "numpy",
     "math-verify>=0.7",    # answer equivalence checking for eval
+    "wandb>=0.31.0",
 ]
 
 [tool.uv]

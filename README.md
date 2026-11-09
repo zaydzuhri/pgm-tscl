@@ -13,6 +13,17 @@ uv run train.py --config configs/tscl_window.json    # TSCL, Window teacher
 uv run train.py --config configs/tscl_window.json --seed 1 --teacher_interval 20   # CLI flags override the JSON
 ```
 
+On the Mila cluster, submit through `run_job.sh`, which passes its arguments to `uv run` and keeps the
+HuggingFace cache on `$SCRATCH` (SLURM output goes to `slurm_logs/`):
+
+```bash
+sbatch run_job.sh train.py --config configs/sft.json
+sbatch -J smoke --time=00:30:00 run_job.sh train.py --config configs/smoke.json
+```
+
+Runs also log to wandb (project `pgm-tscl`; set `wandb_project`/`wandb_entity`, or `--wandb_project ""` to turn it off).
+Log in once with `uv run wandb login`, or put `WANDB_API_KEY` in `.env` (see `.env.example`).
+
 Logs go to `runs/<config>_s<seed>/log.jsonl`, with three record types:
 - `train`: loss and LR
 - `round`: the teacher's distribution, the per-bucket scores, its Q values, and per-bucket data usage
