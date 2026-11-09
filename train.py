@@ -1,7 +1,7 @@
 """Finetune a causal LM (the Student) while a Teacher chooses which difficulty buckets each batch comes from.
 
     uv run train.py --config configs/sft.json
-    uv run train.py --config configs/tscl_window.json --seed 1 --total_steps 1000   # CLI overrides JSON
+    uv run train.py --config configs/tscl_window.json --seed 1 --total_train_steps 1000   # CLI overrides JSON
 
 We follow the *batch POMDP* formulation of TSCL (Matiisen et al. 2017, Sec 2.2), since this is
 supervised learning:
@@ -12,17 +12,21 @@ supervised learning:
                   that contains every bucket
   - reward      = how the scores change (the slope of the learning curve), worked out inside each Teacher
 
-This gives a doubly nested loop:
+Training is one ordinary loop over optimizer steps; the Teacher acts every `teacher_every` steps:
 
-    o_0 = observe(student)                                  # scores before any training
-    for each teacher timestep t:                            # OUTER loop: one teacher decision
-        a_t = teacher.distribution()
-        repeat teacher_interval times:                      # INNER loop: ordinary finetuning steps
-            batch ~ a_t ; one optimizer step on the student
-        o_t = observe(student) ; teacher.update(o_t)        # teacher learns from the score change
+    o_0 = observe(student) ; teacher.update(o_0)            # scores before any training
+    a = teacher.distribution()
+    for step in 1..total_train_steps:
+        batch ~ a ; one optimizer step on the student
+        if step % teacher_every == 0:                       # one Teacher timestep t
+            o_t = observe(student) ; teacher.update(o_t)    # teacher learns from the score change
+            a = teacher.distribution()                      # action a_t for the next teacher_every steps
+
+Teachers that never look at scores (proportional, uniform) skip the observation entirely, so they
+cost exactly as much as plain finetuning.
 
 Fair comparison: every run, whatever its teacher, uses the same number of training examples
-(total_steps x batch_size), the same LR schedule and the same test-eval steps. Only the mix of
+(total_train_steps x batch_size), the same LR schedule and the same test-eval steps. Only the mix of
 buckets in each batch differs. Ordinary finetuning is just the `proportional` teacher, which never
 changes its distribution. The teacher's extra cost (val generations) is logged separately as
 `teacher_eval_examples`.
@@ -57,10 +61,10 @@ class Config:
     # --- Teacher ---
     teacher: str = "proportional"       # see teachers.TEACHERS; "proportional" = ordinary finetuning
     teacher_kwargs: dict = field(default_factory=dict)   # e.g. {"K": 10, "alpha": 0.1, "epsilon": 0.1}
-    teacher_interval: int = 10          # optimizer steps per teacher timestep (inner loop length)
-    always_score: bool = False          # also score baselines each round (only for plotting learning curves)
+    teacher_every: int = 10             # optimizer steps between Teacher timesteps (observe o_t, pick a new a_t)
+    always_score: bool = False          # also score baselines every teacher_every steps (only for plotting learning curves)
     # --- Training budget (keep these identical across runs you compare) ---
-    total_steps: int = 500              # total optimizer steps
+    total_train_steps: int = 500        # optimizer steps in the whole run
     batch_size: int = 32                # examples per optimizer step (use grad_ckpt if memory is tight)
     lr: float = 2e-5                    # TRL SFT default; Qwen3-0.6B full-FT model cards use 2e-5 to 4e-5
     warmup_ratio: float = 0.03
@@ -250,8 +254,8 @@ def main():
     use_scores = teacher.needs_scores or config.always_score
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
-    scheduler = get_cosine_schedule_with_warmup(optimizer, math.ceil(config.warmup_ratio * config.total_steps),
-                                                config.total_steps)
+    num_warmup_steps = math.ceil(config.warmup_ratio * config.total_train_steps)
+    scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, config.total_train_steps)
 
     # Budget counters. Compare runs at equal `examples` (or `tokens`), not equal wall-clock.
     step, teacher_step, examples, tokens, teacher_eval_examples = 0, 0, 0, 0, 0
@@ -276,70 +280,67 @@ def main():
         print(f"[eval] step {step} test_acc={results['test_acc']:.4f} by_level={results['test_acc_by_level']} "
               f"({time.time() - start_time:.0f}s)")
 
+    def observe_and_update_teacher():
+        """One Teacher timestep: observe o_t (per-task val accuracy), let the Teacher update on it
+        (inside teacher.update: reward = score change / learning-curve slope, then the policy update),
+        and log it. Only called for teachers that use scores (or with always_score)."""
+        nonlocal teacher_eval_examples
+        start_time = time.time()
+        val_correct = np.array(evaluate_accuracy(model, tokenizer, val_examples, config, device))  # (N * n_val,) bool
+        scores = np.array([val_correct[val_task_ids == task_id].mean() for task_id in range(num_tasks)])  # (N,) one accuracy per task
+        teacher_eval_examples += len(val_examples)
+        print(f"[teacher] round {teacher_step} scores={np.round(scores, 3).tolist()} ({time.time() - start_time:.0f}s)")
+        teacher.update(scores)
+        log("round", round=teacher_step, **counters(), scores=scores.tolist(), names=task_data.names, **teacher.state())
+
     if config.eval_at_start:
         run_test_eval()
 
     # o_0: score every task once before training, so the first reward (a score change) can be computed.
     # The score of task i is the Student's accuracy on that task's validation examples.
-    scores = None
     if use_scores:
-        start_time = time.time()
-        val_correct = np.array(evaluate_accuracy(model, tokenizer, val_examples, config, device))  # (N * n_val,) bool
-        scores = np.array([val_correct[val_task_ids == task_id].mean() for task_id in range(num_tasks)])      # (N,) one accuracy per task
-        teacher_eval_examples += len(val_examples)
-        print(f"[teacher] o_0 scores={np.round(scores, 3).tolist()} ({time.time() - start_time:.0f}s)")
-        teacher.update(scores)
-        log("round", round=0, **counters(), scores=scores.tolist(), names=task_data.names)
+        observe_and_update_teacher()
+    # Action a_0: the Teacher's first distribution over the N tasks. It is kept until the next Teacher timestep.
+    task_probs = teacher.distribution()                                         # (N,) sums to 1
 
     train_start_time = time.time()
-    while step < config.total_steps:
-        # ===== OUTER LOOP: one Teacher timestep t =====
-        # Action a_t: the Teacher picks a probability distribution over the N tasks.
-        task_probs = teacher.distribution()                                     # (N,) sums to 1
+    for step in range(1, config.total_train_steps + 1):
+        # Sample which task each example comes from (according to the current action), then take examples
+        # from those buckets.  batch: input_ids, attention_mask, labels: (B, L); bucket: (B,)   with B = batch_size
+        batch = data.collate(sampler.sample(task_probs, config.batch_size), tokenizer.pad_token_id)
+        batch = {key: tensor.to(device) for key, tensor in batch.items()}
 
-        # ===== INNER LOOP: the Student trains for `teacher_interval` optimizer steps on batches drawn from a_t =====
-        for _ in range(min(config.teacher_interval, config.total_steps - step)):
-            # Sample which task each example comes from (according to a_t), then take examples from those buckets.
-            # batch: input_ids, attention_mask, labels: (B, L); bucket: (B,)   with B = batch_size
-            batch = data.collate(sampler.sample(task_probs, config.batch_size), tokenizer.pad_token_id)
-            batch = {key: tensor.to(device) for key, tensor in batch.items()}
+        # From here on it is a normal finetuning step.
+        with autocast:
+            loss = forward_loss(model, batch)                                   # () scalar
+        loss.backward()
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
+        optimizer.step()
+        scheduler.step()
+        optimizer.zero_grad(set_to_none=True)
 
-            # From here on it is a normal finetuning step.
-            with autocast:
-                loss = forward_loss(model, batch)                               # () scalar
-            loss.backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad(set_to_none=True)
+        examples += config.batch_size
+        tokens += int((batch["labels"] != -100).sum())                          # (B, L) bool -> count of solution tokens
+        if step % config.log_every == 0:
+            learning_rate = scheduler.get_last_lr()[0]
+            # probs = the action in use; drawn / unique_seen / refills = per-bucket data usage so far
+            log("train", **counters(), loss=loss.item(), grad_norm=float(grad_norm), lr=learning_rate,
+                probs=task_probs.tolist(), drawn=sampler.drawn.tolist(),
+                unique_seen=[len(seen) for seen in sampler.seen], refills=sampler.refills.tolist())
+            seconds_per_step = (time.time() - train_start_time) / step
+            print(f"step {step}/{config.total_train_steps} loss={loss.item():.4f} lr={learning_rate:.2e} "
+                  f"task_probs={np.round(task_probs, 3).tolist()} ({seconds_per_step:.2f}s/step)")
+        # Test evals happen at fixed optimizer steps, so every teacher is measured at the same budget.
+        if step % config.eval_every == 0 or step == config.total_train_steps:
+            run_test_eval()
 
-            step += 1
-            examples += config.batch_size
-            tokens += int((batch["labels"] != -100).sum())                      # (B, L) bool -> count of solution tokens
-            if step % config.log_every == 0:
-                learning_rate = scheduler.get_last_lr()[0]
-                log("train", **counters(), loss=loss.item(), grad_norm=float(grad_norm), lr=learning_rate)
-                seconds_per_step = (time.time() - train_start_time) / step
-                print(f"step {step}/{config.total_steps} loss={loss.item():.4f} lr={learning_rate:.2e} "
-                      f"task_probs={np.round(task_probs, 3).tolist()} ({seconds_per_step:.2f}s/step)")
-            # Test evals happen at fixed optimizer steps, so every teacher is measured at the same budget.
-            if step % config.eval_every == 0 or step == config.total_steps:
-                run_test_eval()
-
-        # ===== Back in the OUTER LOOP: the Teacher observes o_t (per-task val accuracy) and updates =====
-        # (Inside teacher.update: reward = score change / learning-curve slope, then the policy is updated.)
-        teacher_step += 1
-        if use_scores:
-            start_time = time.time()
-            val_correct = np.array(evaluate_accuracy(model, tokenizer, val_examples, config, device))  # (N * n_val,) bool
-            scores = np.array([val_correct[val_task_ids == task_id].mean() for task_id in range(num_tasks)])      # (N,) one accuracy per task
-            teacher_eval_examples += len(val_examples)
-            print(f"[teacher] round {teacher_step} scores={np.round(scores, 3).tolist()} ({time.time() - start_time:.0f}s)")
-            teacher.update(scores)
-        log("round", round=teacher_step, **counters(), probs=task_probs.tolist(), names=task_data.names,
-            scores=None if scores is None else scores.tolist(),
-            drawn=sampler.drawn.tolist(), unique_seen=[len(seen) for seen in sampler.seen],
-            refills=sampler.refills.tolist(), **teacher.state())
+        # Teacher timestep t: observe o_t, update, and choose the action a_t for the next teacher_every steps.
+        # Skipped after the last step, since no training is left to use a new action.
+        if step % config.teacher_every == 0 and step < config.total_train_steps:
+            teacher_step += 1
+            if use_scores:
+                observe_and_update_teacher()
+            task_probs = teacher.distribution()                                 # (N,) sums to 1
 
     if config.save_model:
         model.save_pretrained(os.path.join(config.out_dir, "model"))

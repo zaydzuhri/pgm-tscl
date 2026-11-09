@@ -15,7 +15,7 @@ Training uses standard bf16 mixed precision (fp32 weights and AdamW state, bf16 
 uv sync
 uv run train.py --config configs/sft.json            # ordinary finetuning (baseline)
 uv run train.py --config configs/tscl_window.json    # TSCL, Window teacher
-uv run train.py --config configs/tscl_window.json --seed 1 --teacher_interval 20   # CLI flags override the JSON
+uv run train.py --config configs/tscl_window.json --seed 1 --teacher_every 20   # CLI flags override the JSON
 ```
 
 On the Mila cluster, submit through `run_job.sh`, which passes its arguments to `uv run` and keeps the
@@ -30,9 +30,9 @@ Runs also log to wandb (project `pgm-tscl`; set `wandb_project`/`wandb_entity`, 
 Log in once with `uv run wandb login`, or put `WANDB_API_KEY` in `.env` (see `.env.example`).
 
 Logs go to `runs/<config>_s<seed>/log.jsonl`, with three record types:
-- `train`: loss and LR
-- `round`: the teacher's distribution, the per-bucket scores, its Q values, and per-bucket data usage
+- `train`: loss, LR, the teacher's current distribution (`probs`), and per-bucket data usage
   (`drawn` = total draws, `unique_seen` = distinct examples used, `refills` = times the bucket ran out and started repeating)
+- `round` (only for teachers that observe scores): the per-bucket scores and the teacher's Q values
 - `eval`: MATH-500 accuracy, overall and per level/subject
 
 ## Files
@@ -50,25 +50,26 @@ We use the paper's **batch POMDP** (Sec 2.2, Appendix B), which is the formulati
 | paper | here |
 |---|---|
 | task *i* | a MATH bucket (`bucket_by`: `level` → 5 tasks, `subject` → 7, `level_subject` → 35) |
-| action *a_t* | a distribution over buckets; the next `teacher_interval` optimizer steps sample batches from it |
+| action *a_t* | a distribution over buckets; the next `teacher_every` optimizer steps sample batches from it |
 | observation *o_t* | per-bucket accuracy (greedy decoding) on a held-out val split carved out of MATH train (`n_val_per_bucket` per bucket) |
 | reward *r_t* | score change *o_t − o_{t−1}* (Online, Sampling) or learning-curve slope (Naive, Window) |
 | final task | MATH-500 accuracy (reporting only; the teacher never sees it) |
 
-This makes training a doubly nested loop. The outer loop is the teacher's timesteps. The inner loop is
-`teacher_interval` ordinary optimizer steps.
+Training is one ordinary loop over `total_train_steps` optimizer steps. Every `teacher_every` steps is one teacher
+timestep: the teacher observes the scores, updates, and picks the distribution for the next `teacher_every` steps.
+Baselines (`proportional`, `uniform`) don't observe scores, so for them this costs nothing.
 
 **Cost of the observation**: as in the paper, the score is validation accuracy, which needs generation.
 Each teacher timestep generates N × `n_val_per_bucket` answers (160 with the defaults). This is the main
-overhead of TSCL over plain finetuning. Use `teacher_interval` and `n_val_per_bucket` to trade it off.
+overhead of TSCL over plain finetuning. Use `teacher_every` and `n_val_per_bucket` to trade it off.
 
 ## Fair comparison
 
 Ordinary finetuning is just the `proportional` teacher (bucket probability ∝ bucket size, so it matches
 shuffled SFT). It therefore runs through exactly the same loop. To compare runs, keep these identical:
-`total_steps`, `batch_size`, `lr`, `warmup_ratio`, `eval_every`, `data_seed`.
+`total_train_steps`, `batch_size`, `lr`, `warmup_ratio`, `eval_every`, `data_seed`.
 Every run then trains on the same number of examples, uses the same LR schedule, and is evaluated at the same steps.
-`teacher_interval` only affects teachers that observe scores.
+`teacher_every` only affects teachers that observe scores.
 
 Each log record carries `examples`, `tokens` and `teacher_eval_examples`, so you can plot test accuracy against
 training data used. Note that equal steps does not mean equal tokens: Level 5 solutions are longer.

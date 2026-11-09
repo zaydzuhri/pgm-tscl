@@ -3,7 +3,7 @@
 We use the *batch* POMDP formulation (Sec 2.2 / Appendix B), the one suited to supervised learning:
 
   action      a_t : a probability distribution over the N task buckets; the next
-                    `teacher_interval` optimizer steps draw their batches from it.
+                    `teacher_every` optimizer steps draw their batches from it.
   observation o_t : a vector of per-bucket scores measured after those steps
                     (per-bucket validation accuracy).
   reward      r_t : the change in scores (Online/Sampling) or the slope of the

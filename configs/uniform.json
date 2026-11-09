@@ -6,11 +6,11 @@
   "n_val_per_bucket": 32,
   "max_len": 2048,
   "grad_ckpt": true,
-  "total_steps": 500,
+  "total_train_steps": 500,
   "batch_size": 32,
   "lr": 2e-05,
   "warmup_ratio": 0.03,
-  "teacher_interval": 10,
+  "teacher_every": 10,
   "eval_every": 100,
   "test_size": 500,
   "seed": 0

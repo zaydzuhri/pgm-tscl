@@ -44,20 +44,23 @@ We use the **batch POMDP** formulation (paper Sec 2.2, Appendix B), the one mean
 | reward *r_t* | computed inside each teacher: score change (Online, Sampling) or learning-curve slope (Naive, Window) |
 | final task | MATH-500 accuracy, for reporting only; the Teacher never sees it |
 
-The training loop is **doubly nested** (`train.py: main`):
+Training is **one ordinary loop** over optimizer steps (`train.py: main`); the Teacher acts every `teacher_every` steps:
 
 ```
-o_0 = val accuracy per bucket ; teacher.update(o_0)
-while step < total_steps:                      # OUTER: one teacher timestep
-    a_t = teacher.distribution()
-    repeat teacher_interval times:             # INNER: plain finetuning steps
-        batch ~ a_t (BucketSampler) ; forward ; backward ; optimizer.step
-        test eval every eval_every steps
-    o_t = val accuracy per bucket ; teacher.update(o_t)
+o_0 = val accuracy per bucket ; teacher.update(o_0)       # only for teachers that use scores
+a = teacher.distribution()
+for step in 1..total_train_steps:
+    batch ~ a (BucketSampler) ; forward ; backward ; optimizer.step
+    test eval every eval_every steps
+    if step % teacher_every == 0:                         # one Teacher timestep
+        o_t = val accuracy per bucket ; teacher.update(o_t)   # only for teachers that use scores
+        a = teacher.distribution()
 ```
+
+Baselines (`proportional`, `uniform`) never observe scores, so they cost the same as plain finetuning.
 
 **Fair comparison:** normal finetuning is the `proportional` teacher (bucket probability ∝ bucket size,
-which matches shuffled SFT) running through the same loop. All configs share `total_steps`, `batch_size`,
+which matches shuffled SFT) running through the same loop. All configs share `total_train_steps`, `batch_size`,
 `lr`, `warmup_ratio`, `eval_every`, `data_seed`, so every run sees the same number of training examples,
 the same LR schedule and the same test-eval steps. Logs record `examples`, `tokens` and
 `teacher_eval_examples` (the Teacher's overhead).
@@ -81,8 +84,8 @@ the same LR schedule and the same test-eval steps. Logs record `examples`, `toke
   - Registry: `TEACHERS`.
 - `configs/`: `sft`, `uniform`, `tscl_online`, `tscl_window`, `tscl_sampling` (identical budgets), plus `smoke` (tiny).
 - Output: `runs/<config>_s<seed>/{config.json, log.jsonl}`. `log.jsonl` has three record types:
-  - `train`: loss, lr, grad_norm
-  - `round`: probs, scores, Q, drawn, unique_seen, refills
+  - `train`: loss, lr, grad_norm, probs (the action in use), drawn, unique_seen, refills
+  - `round` (only for teachers that observe scores): scores, Q and other teacher state
   - `eval`: test_acc overall, by level and by subject
 
 Prompt format: plain text for a base model, `Problem: <problem>\nPlease reason step by step, and put your
@@ -108,14 +111,14 @@ Verified (on CPU, laptop):
    uv run train.py --config configs/smoke.json --out_dir runs/smoke
    cat runs/smoke/log.jsonl
    ```
-   Check that `round` records contain `scores`, `probs` and `refills`, and that `eval` records appear.
+   Check that `train` records contain `probs` and `refills`, `round` records contain `scores`, and that `eval` records appear.
    Expect ~0 accuracy in the smoke test, because `max_new_tokens` is 32.
 2. Measure the costs on the real GPU:
    - seconds per training step at `batch_size=32, max_len=1024`. If it runs out of memory, set `"grad_ckpt": true`.
    - time per MATH-500 eval.
    - time per teacher observation: N × `n_val_per_bucket` = 160 generations with the defaults.
 
-   Teacher observation is the main overhead of TSCL. Tune `teacher_interval` and `n_val_per_bucket` with the user.
+   Teacher observation is the main overhead of TSCL. Tune `teacher_every` and `n_val_per_bucket` with the user.
 3. Run `sft` against the TSCL configs with matched budgets and a few seeds. Plot test accuracy against `examples`.
 
 ## 7. Open questions / known caveats to raise with the user
