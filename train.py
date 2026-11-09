@@ -28,11 +28,13 @@ changes its distribution. The teacher's extra cost (val generations) is logged s
 `teacher_eval_examples`.
 """
 import argparse
+import copy
 import dataclasses
 import json
 import math
 import os
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -47,7 +49,7 @@ import teachers
 @dataclass
 class Config:
     # --- Student (model) and tasks (data) ---
-    model: str = "Qwen/Qwen3-0.6B"
+    model: str = "Qwen/Qwen3-0.6B-Base"
     dataset: str = "math"
     bucket_by: str = "level"            # how to split data into tasks: level | subject | level_subject | none
     n_val_per_bucket: int = 32          # held-out examples per task; their accuracy is what the Teacher observes
@@ -60,7 +62,7 @@ class Config:
     # --- Training budget (keep these identical across runs you compare) ---
     total_steps: int = 500              # total optimizer steps
     batch_size: int = 32                # examples per optimizer step (use grad_ckpt if memory is tight)
-    lr: float = 1e-5
+    lr: float = 2e-5                    # TRL SFT default; Qwen3-0.6B full-FT model cards use 2e-5 to 4e-5
     warmup_ratio: float = 0.03
     weight_decay: float = 0.0
     max_grad_norm: float = 1.0
@@ -118,8 +120,10 @@ def load_model(config, device):
     tokenizer = AutoTokenizer.from_pretrained(config.model)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    # Everything (weights, gradients, optimizer state, forward/backward, generation) is in bf16.
-    model = AutoModelForCausalLM.from_pretrained(config.model, dtype=torch.bfloat16).to(device)
+    # Standard bf16 mixed precision (what HF Trainer's bf16=True does): weights, gradients and AdamW state
+    # stay in fp32, and the forward/backward pass runs in bf16 autocast (see main). Loading in fp32 must be
+    # explicit, because transformers otherwise loads Qwen3 in its checkpoint dtype (bf16).
+    model = AutoModelForCausalLM.from_pretrained(config.model, dtype=torch.float32).to(device)
     if config.grad_ckpt:
         model.gradient_checkpointing_enable()
         model.config.use_cache = False
@@ -141,7 +145,7 @@ def forward_loss(model, batch):
     labels = batch["labels"][:, 1:]               # (B, L-1)  token t predicts token t+1
     has_label = labels != -100                    # (B, L-1)  bool, True on the T solution tokens
     selected_hidden = hidden_states[:, :-1][has_label]                          # (T, D)
-    logits = model.get_output_embeddings()(selected_hidden)                     # (T, V)
+    logits = model.get_output_embeddings()(selected_hidden).float()             # (T, V)  upcast for the loss, as HF does
     return F.cross_entropy(logits, labels[has_label])                           # (T, V), (T,) -> ()
 
 
@@ -151,28 +155,27 @@ def evaluate_accuracy(model, tokenizer, examples, config, device):
     """Greedy-decode each problem and check its final \\boxed{} answer against the reference.
     Returns a list of True/False, one per example.
 
+    Generation uses a bf16 copy of the weights (like HF's bf16_full_eval); the fp32 training weights are untouched.
+
     Shapes (per generation batch): B = up to gen_batch_size, P = padded prompt length,
                                    G = number of generated tokens (<= max_new_tokens)."""
-    model.eval()
+    generation_model = copy.deepcopy(model).to(torch.bfloat16).eval()
     tokenizer.padding_side = "left"
-    stop_token_ids = [tokenizer.eos_token_id]
-    im_end_id = tokenizer.convert_tokens_to_ids("<|im_end|>")    # Qwen chat end-of-turn token
-    if isinstance(im_end_id, int) and im_end_id != tokenizer.unk_token_id:
-        stop_token_ids.append(im_end_id)
 
     correct = []
     for start in range(0, len(examples), config.gen_batch_size):
         chunk = examples[start:start + config.gen_batch_size]
-        prompts = [data.format_prompt(tokenizer, example["problem"]) for example in chunk]
+        prompts = [data.format_prompt(example["problem"]) for example in chunk]
         # inputs["input_ids"], inputs["attention_mask"]: (B, P), left-padded so all prompts end at the same position
         inputs = tokenizer(prompts, return_tensors="pt", padding=True, add_special_tokens=False).to(device)
-        generated = model.generate(**inputs, max_new_tokens=config.max_new_tokens, do_sample=False,
-                                   temperature=None, top_p=None, top_k=None, use_cache=True,
-                                   eos_token_id=stop_token_ids, pad_token_id=tokenizer.pad_token_id)  # (B, P + G)
+        generated = generation_model.generate(**inputs, max_new_tokens=config.max_new_tokens, do_sample=False,
+                                              temperature=None, top_p=None, top_k=None, use_cache=True,
+                                              eos_token_id=tokenizer.eos_token_id,
+                                              pad_token_id=tokenizer.pad_token_id)                   # (B, P + G)
         prompt_length = inputs["input_ids"].shape[1]                                                       # P
         completions = tokenizer.batch_decode(generated[:, prompt_length:], skip_special_tokens=True)       # (B, G) -> B strings
         correct += [data.is_correct(completion, example["answer"]) for completion, example in zip(completions, chunk)]
-    model.train()
+    del generation_model
     return correct
 
 
@@ -182,7 +185,7 @@ def main():
     os.makedirs(config.out_dir, exist_ok=True)
     with open(os.path.join(config.out_dir, "config.json"), "w") as config_file:
         json.dump(dataclasses.asdict(config), config_file, indent=2)
-    log_file = open(os.path.join(config.out_dir, "log.jsonl"), "a")
+    log_file = open(os.path.join(config.out_dir, "log.jsonl"), "w")   # a re-run of the same config starts a fresh log
     wandb_run = None
     if config.wandb_project:
         import wandb
@@ -216,6 +219,7 @@ def main():
     torch.manual_seed(config.seed)
     np.random.seed(config.seed)
     device = get_device()
+    autocast = torch.autocast("cuda", dtype=torch.bfloat16) if device == "cuda" else nullcontext()
 
     # --- Student ---
     tokenizer, model = load_model(config, device)
@@ -301,7 +305,8 @@ def main():
             batch = {key: tensor.to(device) for key, tensor in batch.items()}
 
             # From here on it is a normal finetuning step.
-            loss = forward_loss(model, batch)                                   # () scalar
+            with autocast:
+                loss = forward_loss(model, batch)                               # () scalar
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config.max_grad_norm)
             optimizer.step()

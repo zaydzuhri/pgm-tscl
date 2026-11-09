@@ -37,7 +37,7 @@ We use the **batch POMDP** formulation (paper Sec 2.2, Appendix B), the one mean
 
 | paper | code |
 |---|---|
-| Student | the LLM (`Qwen/Qwen3-0.6B`) |
+| Student | the LLM (`Qwen/Qwen3-0.6B-Base`) |
 | task *i* | a MATH difficulty bucket (`bucket_by`: `level` → 5 tasks, `subject` → 7, `level_subject` → 35) |
 | action *a_t* | `teacher.distribution()`, an (N,) distribution over buckets |
 | observation *o_t* | per-bucket **greedy-decoding accuracy** on a held-out val split (`n_val_per_bucket` per bucket, carved out of MATH train with a fixed `data_seed`) |
@@ -85,12 +85,10 @@ the same LR schedule and the same test-eval steps. Logs record `examples`, `toke
   - `round`: probs, scores, Q, drawn, unique_seen, refills
   - `eval`: test_acc overall, by level and by subject
 
-Prompt format: the Qwen chat template with `enable_thinking=False`. The user message is the problem plus
-"Please reason step by step, and put your final answer within \boxed{}." Only the solution tokens (plus
-EOS) are trained on. That instruction is a Qwen convention, not part of MATH. The original MATH paper used
-no instruction, because the training solutions already contain `\boxed{}`. We keep the instruction so the
-step-0 eval and the Teacher's o_0 aren't dominated by formatting failures. An open option: move it to a
-system message, which is what Qwen2.5-Math does.
+Prompt format: plain text for a base model, `Problem: <problem>\nPlease reason step by step, and put your
+final answer within \boxed{}.\nSolution: `. Only the solution tokens (plus EOS) are trained on. The
+instruction is not part of MATH; we keep it so the step-0 eval and the Teacher's o_0 aren't dominated by
+formatting failures (Qwen3-0.6B-Base scores ~32% on MATH-500 with it).
 
 ## 5. What has been verified and what hasn't
 
@@ -125,5 +123,4 @@ Verified (on CPU, laptop):
 - **Budget unit:** equal steps is not equal tokens, because Level 5 solutions are longer. Decide whether the comparison should be token-matched.
 - **Noisy scores:** val accuracy on 32 examples per bucket moves in steps of ~3%. The paper used 4096-example val sets. Its `tau=4e-4` (Boltzmann) and `epsilon=0.1` likely need retuning.
 - **Generation speed:** HF `generate` is used. vLLM would be much faster for evals if they become the bottleneck, but it adds a dependency. Ask first.
-- **Base vs instruct model:** `Qwen3-0.6B` is the post-trained hybrid model. `Qwen3-0.6B-Base` is an option, and the code supports any HF causal LM through `model`.
 - **More baselines:** a hand-designed curriculum (easy → hard) isn't implemented yet. It's the paper's other baseline and would be a new `Teacher` subclass.

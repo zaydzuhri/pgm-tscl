@@ -1,8 +1,13 @@
 # TSCL for LLM finetuning
 
 Teacher-Student Curriculum Learning ([Matiisen et al., 2017](1707.00183v2.pdf)) applied to supervised finetuning of
-Qwen3-0.6B on Hendrycks MATH. The **Student** is the LLM. The **tasks** are difficulty buckets of MATH. The
+Qwen3-0.6B-Base on Hendrycks MATH. The **Student** is the LLM. The **tasks** are difficulty buckets of MATH. The
 **Teacher** decides what fraction of each training batch comes from each bucket.
+
+The model is a base (pretrained-only) model, which starts at about 32% on MATH-500. The prompt is plain text:
+`Problem: <problem>\nPlease reason step by step, and put your final answer within \boxed{}.\nSolution: `.
+Training uses standard bf16 mixed precision (fp32 weights and AdamW state, bf16 autocast), the same as HF Trainer's
+`bf16=True`. Evals generate with a bf16 copy of the weights.
 
 ## Setup and running
 

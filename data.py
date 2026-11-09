@@ -80,17 +80,14 @@ def load_task_data(name, **kwargs) -> TaskData:
 
 
 # ----------------------------------------------------------------------------- tokenization
-def format_prompt(tokenizer, problem):
-    messages = [{"role": "user", "content": problem + PROMPT_SUFFIX}]
-    if tokenizer.chat_template:
-        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True,
-                                             enable_thinking=False)
+def format_prompt(problem):
+    """Plain-text prompt for a base model; the model continues with the solution."""
     return f"Problem: {problem}{PROMPT_SUFFIX}\nSolution: "
 
 
 def encode(tokenizer, example, max_len, bucket):
     """Prompt tokens are masked out of the loss (-100); only the solution is trained on."""
-    prompt_ids = tokenizer(format_prompt(tokenizer, example["problem"]), add_special_tokens=False).input_ids
+    prompt_ids = tokenizer(format_prompt(example["problem"]), add_special_tokens=False).input_ids
     solution_ids = tokenizer(example["solution"] + tokenizer.eos_token, add_special_tokens=False).input_ids
     return dict(input_ids=(prompt_ids + solution_ids)[:max_len],
                 labels=([-100] * len(prompt_ids) + solution_ids)[:max_len],

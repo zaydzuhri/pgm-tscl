@@ -1,6 +1,6 @@
 {
   "teacher": "uniform",
-  "model": "Qwen/Qwen3-0.6B",
+  "model": "Qwen/Qwen3-0.6B-Base",
   "dataset": "math",
   "bucket_by": "level",
   "n_val_per_bucket": 32,
@@ -8,7 +8,7 @@
   "grad_ckpt": true,
   "total_steps": 500,
   "batch_size": 32,
-  "lr": 1e-05,
+  "lr": 2e-05,
   "warmup_ratio": 0.03,
   "teacher_interval": 10,
   "eval_every": 100,
