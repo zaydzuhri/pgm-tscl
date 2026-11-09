@@ -8,7 +8,7 @@ supervised learning:
 
   - tasks       = difficulty buckets of MATH (e.g. Level 1..5)
   - action a_t  = a probability distribution over the N buckets; training batches are sampled from it
-  - observation = per-bucket accuracies o_t = (x^(1)_t, ..., x^(N)_t) on a held-out validation set
+œ  - observation = per-bucket accuracies o_t = (x^(1)_t, ..., x^(N)_t) on a held-out validation set
                   that contains every bucket
   - reward      = how the scores change (the slope of the learning curve), worked out inside each Teacher
 
