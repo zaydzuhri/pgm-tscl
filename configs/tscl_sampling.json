@@ -16,6 +16,7 @@
   "warmup_ratio": 0.03,
   "teacher_every": 10,
   "eval_every": 100,
+  "val_loss_every": 50,
   "test_size": 500,
   "seed": 0
 }

@@ -6,13 +6,14 @@
   "n_val_per_bucket": 32,
   "max_len": 2048,
   "grad_ckpt": true,
-  "total_train_steps": 500,
+  "total_train_steps": 1500,
   "batch_size": 32,
   "lr": 2e-05,
   "warmup_ratio": 0.1,
   "weight_decay": 0.001,
   "teacher_every": 10,
-  "eval_every": 100,
+  "eval_every": 150,
+  "val_loss_every": 50,
   "test_size": 500,
   "seed": 0
 }

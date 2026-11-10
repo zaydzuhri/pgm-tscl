@@ -29,10 +29,12 @@ sbatch -J smoke --time=00:30:00 run_job.sh train.py --config configs/smoke.json
 Runs also log to wandb (project `pgm-tscl`; set `wandb_project`/`wandb_entity`, or `--wandb_project ""` to turn it off).
 Log in once with `uv run wandb login`, or put `WANDB_API_KEY` in `.env` (see `.env.example`).
 
-Logs go to `runs/<config>_s<seed>/log.jsonl`, with three record types:
+Logs go to `runs/<config>_s<seed>/log.jsonl`, with four record types:
 - `train`: loss, LR, the teacher's current distribution (`probs`), and per-bucket data usage
   (`drawn` = total draws, `unique_seen` = distinct examples used, `refills` = times the bucket ran out and started repeating)
 - `round` (only for teachers that observe scores): the per-bucket scores and the teacher's Q values
+- `val`: loss on the held-out val split, overall and per bucket, every `val_loss_every` steps (and once before training).
+  It is the same loss as the training loss and needs no generation, so it is cheap. `--val_loss_every 0` turns it off
 - `eval`: MATH-500 accuracy, overall and per level/subject
 
 ## Files

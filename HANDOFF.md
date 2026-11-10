@@ -71,7 +71,8 @@ the same LR schedule and the same test-eval steps. Logs record `examples`, `toke
   - `Config` dataclass and `load_config` (defaults ← JSON ← `--key value` CLI overrides)
   - `load_model`
   - `forward_loss`: computes logits only at label positions to save memory with the 150k-token vocab. Verified to equal HF `model(...).loss` exactly.
-  - `evaluate_accuracy`: the only evaluation function.
+  - `evaluate_accuracy`: greedy-decoding accuracy (used for the Teacher's observation and the test eval).
+  - `evaluate_loss`: teacher-forced loss on the held-out val split, overall and per bucket (no generation).
   - `main`: the loop.
 - `data.py`
   - `load_math`: train from `EleutherAI/hendrycks_math`, all 7 subject configs, dropping "Level ?" and rows without a `\boxed` answer; test is `HuggingFaceH4/MATH-500`.
@@ -83,9 +84,10 @@ the same LR schedule and the same test-eval steps. Logs record `examples`, `toke
   - Paper teachers: `online`, `naive`, `window`, `sampling` (batch versions, Algorithms 5–8).
   - Registry: `TEACHERS`.
 - `configs/`: `sft`, `uniform`, `tscl_online`, `tscl_window`, `tscl_sampling` (identical budgets), plus `smoke` (tiny).
-- Output: `runs/<config>_s<seed>/{config.json, log.jsonl}`. `log.jsonl` has three record types:
+- Output: `runs/<config>_s<seed>/{config.json, log.jsonl}`. `log.jsonl` has four record types:
   - `train`: loss, lr, grad_norm, probs (the action in use), drawn, unique_seen, refills
   - `round` (only for teachers that observe scores): scores, Q and other teacher state
+  - `val`: loss on the held-out val split (overall and per bucket), every `val_loss_every` steps and once at step 0
   - `eval`: test_acc overall, by level and by subject
 
 Prompt format: plain text for a base model, `Problem: <problem>\nPlease reason step by step, and put your

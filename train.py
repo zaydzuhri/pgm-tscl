@@ -73,6 +73,7 @@ class Config:
     grad_ckpt: bool = False
     # --- Evaluation / logging ---
     eval_every: int = 100               # optimizer steps between test-set evaluations (same for every teacher)
+    val_loss_every: int = 50            # optimizer steps between validation-loss measurements (0 = never)
     eval_at_start: bool = True
     test_size: int = 500                # 0 = full test set
     gen_batch_size: int = 64
@@ -183,6 +184,30 @@ def evaluate_accuracy(model, tokenizer, examples, config, device):
     return correct
 
 
+@torch.no_grad()
+def evaluate_loss(model, tokenizer, encoded_buckets, config, device, autocast):
+    """Loss on held-out examples: the same mean next-token cross-entropy over solution tokens as the
+    training loss (teacher forcing, no generation, so it is cheap).
+    Input:  encoded_buckets: N lists of encoded examples (one list per task)
+    Output: (per-task loss (N,), overall loss ()), each a mean over solution tokens.
+            A task with no usable examples gets NaN."""
+    model.eval()
+    loss_sums = np.zeros(len(encoded_buckets))        # (N,) summed token losses per task
+    token_counts = np.zeros(len(encoded_buckets))     # (N,) number of solution tokens per task
+    for task_id, bucket in enumerate(encoded_buckets):
+        for start in range(0, len(bucket), config.batch_size):
+            batch = data.collate(bucket[start:start + config.batch_size], tokenizer.pad_token_id)
+            batch = {key: tensor.to(device) for key, tensor in batch.items()}    # input_ids, attention_mask, labels: (B, L)
+            num_tokens = int((batch["labels"] != -100).sum())                    # T, solution tokens in this batch
+            with autocast:
+                loss = forward_loss(model, batch)                                # () mean over the T tokens
+            loss_sums[task_id] += loss.item() * num_tokens
+            token_counts[task_id] += num_tokens
+    model.train()
+    per_task_loss = np.where(token_counts > 0, loss_sums / np.maximum(token_counts, 1), np.nan)   # (N,)
+    return per_task_loss, loss_sums.sum() / token_counts.sum()
+
+
 # ----------------------------------------------------------------------------- main: the Teacher-Student loop
 def main():
     config = load_config()
@@ -233,12 +258,17 @@ def main():
     task_data = data.load_task_data(config.dataset, bucket_by=config.bucket_by,
                                     n_val=config.n_val_per_bucket, data_seed=config.data_seed)
     num_tasks = len(task_data.names)
-    train_encoded = [[data.encode(tokenizer, example, config.max_len, task_id) for example in bucket]
-                     for task_id, bucket in enumerate(task_data.train)]
-    # Drop examples whose solution was cut off entirely by max_len: they have no tokens to train on,
-    # and a batch made only of them would give a NaN loss.
-    train_encoded = [[encoded for encoded in bucket if any(label != -100 for label in encoded["labels"])]
-                     for bucket in train_encoded]
+
+    def encode_buckets(buckets):
+        """Tokenize every example of every bucket. Examples whose solution was cut off entirely by max_len
+        are dropped: they have no tokens to compute a loss on, and a batch made only of them would give NaN."""
+        encoded_buckets = [[data.encode(tokenizer, example, config.max_len, task_id) for example in bucket]
+                           for task_id, bucket in enumerate(buckets)]
+        return [[encoded for encoded in bucket if any(label != -100 for label in encoded["labels"])]
+                for bucket in encoded_buckets]
+
+    train_encoded = encode_buckets(task_data.train)
+    val_encoded = encode_buckets(task_data.val)       # for the validation loss
     test_examples = task_data.test[:config.test_size] if config.test_size else task_data.test
     # All validation examples in one flat list, so observing the scores is one batched generation over
     # every task instead of one per task. val_task_ids[k] is the task of val_examples[k].
@@ -280,6 +310,15 @@ def main():
         print(f"[eval] step {step} test_acc={results['test_acc']:.4f} by_level={results['test_acc_by_level']} "
               f"({time.time() - start_time:.0f}s)")
 
+    def run_val_loss():
+        """Loss on the held-out validation examples, overall and per task. These are the same examples the
+        Teacher's observation is measured on (as accuracy), and they are never trained on."""
+        start_time = time.time()
+        per_task_loss, overall_loss = evaluate_loss(model, tokenizer, val_encoded, config, device, autocast)
+        log("val", **counters(), loss=float(overall_loss), loss_by_bucket=per_task_loss.tolist())
+        print(f"[val] step {step} loss={overall_loss:.4f} by_bucket={np.round(per_task_loss, 4).tolist()} "
+              f"({time.time() - start_time:.0f}s)")
+
     def observe_and_update_teacher():
         """One Teacher timestep: observe o_t (per-task val accuracy), let the Teacher update on it
         (inside teacher.update: reward = score change / learning-curve slope, then the policy update),
@@ -295,6 +334,8 @@ def main():
 
     if config.eval_at_start:
         run_test_eval()
+    if config.val_loss_every:
+        run_val_loss()                  # validation loss before any training
 
     # o_0: score every task once before training, so the first reward (a score change) can be computed.
     # The score of task i is the Student's accuracy on that task's validation examples.
@@ -330,6 +371,8 @@ def main():
             seconds_per_step = (time.time() - train_start_time) / step
             print(f"step {step}/{config.total_train_steps} loss={loss.item():.4f} lr={learning_rate:.2e} "
                   f"task_probs={np.round(task_probs, 3).tolist()} ({seconds_per_step:.2f}s/step)")
+        if config.val_loss_every and (step % config.val_loss_every == 0 or step == config.total_train_steps):
+            run_val_loss() # log held out validation loss
         # Test evals happen at fixed optimizer steps, so every teacher is measured at the same budget.
         if step % config.eval_every == 0 or step == config.total_train_steps:
             run_test_eval()
