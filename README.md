@@ -35,7 +35,9 @@ Logs go to `runs/<config>_s<seed>/log.jsonl`, with four record types:
 - `round` (only for teachers that observe scores): the per-bucket scores and the teacher's Q values
 - `val`: loss on the held-out val split, overall and per bucket, every `val_loss_every` steps (and once before training).
   It is the same loss as the training loss and needs no generation, so it is cheap. `--val_loss_every 0` turns it off
-- `eval`: MATH-500 accuracy, overall and per level/subject
+- `eval`: every `eval_every` steps, greedy-decoding accuracy on MATH-500 (overall and per level/subject), on the val
+  split (per bucket), and on a fixed subset of the training data (`n_train_acc_per_bucket` per bucket, 0 = skip).
+  Train accuracy far above val/test accuracy means the model is fitting its training data rather than generalizing
 
 ## Files
 

@@ -88,7 +88,7 @@ the same LR schedule and the same test-eval steps. Logs record `examples`, `toke
   - `train`: loss, lr, grad_norm, probs (the action in use), drawn, unique_seen, refills
   - `round` (only for teachers that observe scores): scores, Q and other teacher state
   - `val`: loss on the held-out val split (overall and per bucket), every `val_loss_every` steps and once at step 0
-  - `eval`: test_acc overall, by level and by subject
+  - `eval`: test_acc overall, by level and by subject; val_acc and train_acc (a fixed `n_train_acc_per_bucket` subset of train), overall and per bucket
 
 Prompt format: plain text for a base model, `Problem: <problem>\nPlease reason step by step, and put your
 final answer within \boxed{}.\nSolution: `. Only the solution tokens (plus EOS) are trained on. The

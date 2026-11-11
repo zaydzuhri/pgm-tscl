@@ -11,6 +11,7 @@
   "teacher_every": 2,
   "eval_every": 4,
   "val_loss_every": 2,
+  "n_train_acc_per_bucket": 2,
   "test_size": 4,
   "seed": 0,
   "teacher": "window",

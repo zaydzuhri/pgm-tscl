@@ -72,7 +72,8 @@ class Config:
     max_grad_norm: float = 1.0
     grad_ckpt: bool = False
     # --- Evaluation / logging ---
-    eval_every: int = 100               # optimizer steps between test-set evaluations (same for every teacher)
+    eval_every: int = 100               # optimizer steps between accuracy evals on test, val and a train subset (same for every teacher)
+    n_train_acc_per_bucket: int = 32    # training examples per task whose accuracy is also measured at each eval (0 = skip)
     val_loss_every: int = 50            # optimizer steps between validation-loss measurements (0 = never)
     eval_at_start: bool = True
     test_size: int = 500                # 0 = full test set
@@ -274,6 +275,11 @@ def main():
     # every task instead of one per task. val_task_ids[k] is the task of val_examples[k].
     val_examples = [example for bucket in task_data.val for example in bucket]
     val_task_ids = np.array([task_id for task_id, bucket in enumerate(task_data.val) for _ in bucket])  # (N * n_val,)
+    # A fixed subset of the training examples, to compare accuracy on data the Student trains on against
+    # held-out data (val, test). Buckets are already shuffled by data_seed, so the first ones are a random subset.
+    train_acc_examples = [example for bucket in task_data.train for example in bucket[:config.n_train_acc_per_bucket]]
+    train_acc_task_ids = np.array([task_id for task_id, bucket in enumerate(task_data.train)
+                                   for _ in bucket[:config.n_train_acc_per_bucket]])                       # (N * n_train_acc,)
     bucket_sizes = [len(bucket) for bucket in train_encoded]
     print(f"device={device} buckets={dict(zip(task_data.names, bucket_sizes))} "
           f"val/bucket={config.n_val_per_bucket} test={len(test_examples)}")
@@ -293,21 +299,39 @@ def main():
     def counters():
         return dict(step=step, examples=examples, tokens=tokens, teacher_eval_examples=teacher_eval_examples)
 
-    def run_test_eval():
-        """Final-task performance on the test set (MATH-500), overall and per level / subject.
-        Only for reporting; the Teacher never sees it."""
+    def per_task_accuracy(correct, task_ids):
+        """(K,) bool correctness and (K,) task ids -> (N,) accuracy per task (NaN for a task with no examples)."""
+        return [float(correct[task_ids == task_id].mean()) if (task_ids == task_id).any() else float("nan")
+                for task_id in range(num_tasks)]
+
+    def run_eval():
+        """Accuracy (greedy decoding) on three sets, in one batched generation:
+          - test (MATH-500): the final task, overall and per level / subject. The Teacher never sees it.
+          - val: the held-out examples the Teacher observes, per task.
+          - train: a fixed subset of the training examples, per task. A gap between train and val/test
+            accuracy shows how much the Student is fitting its training data instead of generalizing."""
         start_time = time.time()
-        print(f"[eval] step {step}: generating answers for {len(test_examples)} test problems "
-              f"(up to {config.max_new_tokens} new tokens each)...")
-        correct = evaluate_accuracy(model, tokenizer, test_examples, config, device)
-        results = {"test_acc": float(np.mean(correct))}
+        eval_examples = test_examples + val_examples + train_acc_examples
+        print(f"[eval] step {step}: generating answers for {len(test_examples)} test + {len(val_examples)} val + "
+              f"{len(train_acc_examples)} train problems (up to {config.max_new_tokens} new tokens each)...")
+        correct = np.array(evaluate_accuracy(model, tokenizer, eval_examples, config, device))   # (K,) bool
+        test_correct = correct[:len(test_examples)]
+        val_correct = correct[len(test_examples):len(test_examples) + len(val_examples)]
+        train_correct = correct[len(test_examples) + len(val_examples):]
+        results = {"test_acc": float(test_correct.mean())}
         for group_by in ("level", "subject"):
             groups = {}
-            for was_correct, example in zip(correct, test_examples):
+            for was_correct, example in zip(test_correct, test_examples):
                 groups.setdefault(data.bucket_key(example, group_by), []).append(was_correct)
             results[f"test_acc_by_{group_by}"] = {name: float(np.mean(values)) for name, values in sorted(groups.items())}
+        results["val_acc"] = float(val_correct.mean())
+        results["val_acc_by_bucket"] = per_task_accuracy(val_correct, val_task_ids)
+        if len(train_correct):
+            results["train_acc"] = float(train_correct.mean())
+            results["train_acc_by_bucket"] = per_task_accuracy(train_correct, train_acc_task_ids)
         log("eval", **counters(), **results)
-        print(f"[eval] step {step} test_acc={results['test_acc']:.4f} by_level={results['test_acc_by_level']} "
+        print(f"[eval] step {step} test_acc={results['test_acc']:.4f} val_acc={results['val_acc']:.4f} "
+              f"train_acc={results.get('train_acc', float('nan')):.4f} by_level={results['test_acc_by_level']} "
               f"({time.time() - start_time:.0f}s)")
 
     def run_val_loss():
@@ -333,7 +357,7 @@ def main():
         log("round", round=teacher_step, **counters(), scores=scores.tolist(), names=task_data.names, **teacher.state())
 
     if config.eval_at_start:
-        run_test_eval()
+        run_eval()
     if config.val_loss_every:
         run_val_loss()                  # validation loss before any training
 
@@ -373,9 +397,9 @@ def main():
                   f"task_probs={np.round(task_probs, 3).tolist()} ({seconds_per_step:.2f}s/step)")
         if config.val_loss_every and (step % config.val_loss_every == 0 or step == config.total_train_steps):
             run_val_loss() # log held out validation loss
-        # Test evals happen at fixed optimizer steps, so every teacher is measured at the same budget.
+        # Accuracy evals happen at fixed optimizer steps, so every teacher is measured at the same budget.
         if step % config.eval_every == 0 or step == config.total_train_steps:
-            run_test_eval()
+            run_eval()
 
         # Teacher timestep t: observe o_t, update, and choose the action a_t for the next teacher_every steps.
         # Skipped after the last step, since no training is left to use a new action.
