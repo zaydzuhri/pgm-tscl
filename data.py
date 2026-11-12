@@ -51,25 +51,60 @@ def split_into_buckets(train_rows, test_rows, bucket_by, n_val, data_seed=0):
 
 
 # ----------------------------------------------------------------------------- datasets
-MATH_SUBJECTS = ["algebra", "counting_and_probability", "geometry", "intermediate_algebra",
-                 "number_theory", "prealgebra", "precalculus"]
+# DART-Math's `domain` names -> the subject names MATH-500 uses (so bucket_by="subject" matches the test set)
+DART_SUBJECTS = {"Algebra": "Algebra", "Counting&Probability": "Counting & Probability", "Geometry": "Geometry",
+                 "IntermediateAlgebra": "Intermediate Algebra", "NumberTheory": "Number Theory",
+                 "Prealgebra": "Prealgebra", "Precalculus": "Precalculus"}
+
+
+def boxed_solution(response):
+    """Most DART-Math responses end with "The answer is: X" and have no \\boxed{}. Rewrite that ending as
+    "The answer is $\\boxed{X}$." so every training solution ends the way the prompt asks, and the way answers
+    are graded (last_boxed). If the response already boxed its answer, the ending is redundant (and often
+    mangled LaTeX), so it is dropped instead. Returns None if the response has no final answer in either form."""
+    index = response.rfind("The answer is:")
+    if index >= 0:
+        before = response[:index]
+        if last_boxed(before) is not None:
+            response = before.rstrip()
+        else:
+            answer = response[index + len("The answer is:"):].strip().rstrip(".").strip().strip("$").strip()  # "$140$." -> "140"
+            answer = answer.removeprefix("\\[").removesuffix("\\]").strip().rstrip(".").strip()           # "\\[27.\\]" -> "27"
+            answer = last_boxed(answer) or answer                                                       # "\\boxed{x}" -> "x"
+            if before and not before[-1].isspace():   # some responses glue it on: "...solutions.The answer is: 301"
+                before += " "
+            response = before + f"The answer is $\\boxed{{{answer}}}$."
+    return response if last_boxed(response) is not None else None
 
 
 def load_math(bucket_by="level", n_val=32, data_seed=0):
-    """Hendrycks MATH train split (7.5k problems) bucketed by level and/or subject; MATH-500 as test set."""
-    train_rows = []
-    for subject in MATH_SUBJECTS:
-        for row in load_dataset("EleutherAI/hendrycks_math", subject, split="train"):
-            level = row["level"].replace("Level ", "")
-            answer = last_boxed(row["solution"])
-            if not level.isdigit() or answer is None:  # a handful are "Level ?" or have no \boxed answer
-                continue
-            train_rows.append(dict(problem=row["problem"], solution=row["solution"], answer=answer,
-                                   level=int(level), subject=row["type"]))
+    """MATH problems bucketed by level and/or subject; MATH-500 as test set.
+
+    Training solutions come from the DART-Math pool (hkust-nlp/dart-math-pool-math): ~1.6M correct solutions
+    sampled from DeepSeekMath-7B-RL for the 7.5k MATH train problems, about 200 per problem. The val split is
+    made per problem, so no solution of a val problem is ever trained on; each val problem keeps one of its
+    solutions as the target for the validation loss."""
+    pool = load_dataset("hkust-nlp/dart-math-pool-math", split="train")
+    columns = {name: pool[name] for name in ("query_id", "query", "resp", "gt_ans", "query_metadata", "domain")}
+    solutions_by_problem, problem_rows = {}, {}
+    for query_id, problem, response, answer, metadata, domain in zip(*columns.values()):
+        solution = boxed_solution(response)
+        if solution is None or metadata is None or metadata["level"] is None:
+            continue
+        row = dict(problem=problem, solution=solution, answer=answer, level=metadata["level"], subject=DART_SUBJECTS[domain])
+        solutions_by_problem.setdefault(query_id, []).append(row)
+        problem_rows.setdefault(query_id, dict(row, query_id=query_id))   # one row per problem, for the split
     test_rows = [dict(problem=row["problem"], solution=row["solution"], answer=row["answer"],
                       level=int(row["level"]), subject=row["subject"])
                  for row in load_dataset("HuggingFaceH4/MATH-500", split="test")]
-    return split_into_buckets(train_rows, test_rows, bucket_by, n_val, data_seed)
+    task_data = split_into_buckets(list(problem_rows.values()), test_rows, bucket_by, n_val, data_seed)
+    # Replace each training problem by all of its solutions, shuffled (so the first examples of a bucket
+    # are a random subset, which train.py uses for train accuracy).
+    random_generator = random.Random(data_seed)
+    for task_id, bucket in enumerate(task_data.train):
+        task_data.train[task_id] = [row for problem in bucket for row in solutions_by_problem[problem["query_id"]]]
+        random_generator.shuffle(task_data.train[task_id])
+    return task_data
 
 
 DATASETS = {"math": load_math}
@@ -118,10 +153,13 @@ class BucketSampler:
 
     Each bucket is its own shuffled queue (sampling without replacement, reshuffled when it runs
     out), so with the `proportional` teacher this matches ordinary shuffled finetuning.
+    `encode(example, bucket)`, if given, is applied to each example when it is drawn (so a large
+    dataset doesn't have to be tokenized up front).
     """
 
-    def __init__(self, buckets, seed=0):
+    def __init__(self, buckets, seed=0, encode=None):
         self.buckets = buckets
+        self.encode = encode
         self.random_generator = np.random.default_rng(seed)
         self.queues = [[] for _ in buckets]
         self.drawn = np.zeros(len(buckets), dtype=np.int64)    # total draws per bucket
@@ -135,7 +173,8 @@ class BucketSampler:
             self.queues[bucket] = self.random_generator.permutation(len(self.buckets[bucket])).tolist()
         index = self.queues[bucket].pop()
         self.seen[bucket].add(index)
-        return self.buckets[bucket][index]
+        example = self.buckets[bucket][index]
+        return self.encode(example, bucket) if self.encode else example
 
     def sample(self, probs, batch_size):
         """Choose a bucket for each example according to `probs`, then take examples from those buckets."""

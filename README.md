@@ -4,6 +4,12 @@ Teacher-Student Curriculum Learning ([Matiisen et al., 2017](1707.00183v2.pdf)) 
 Qwen3-0.6B-Base on Hendrycks MATH. The **Student** is the LLM. The **tasks** are difficulty buckets of MATH. The
 **Teacher** decides what fraction of each training batch comes from each bucket.
 
+Training solutions come from the [DART-Math pool](https://huggingface.co/datasets/hkust-nlp/dart-math-pool-math):
+about 1.5M correct solutions (sampled from DeepSeekMath-7B-RL) to the 7.5k MATH train problems, about 200 per problem.
+The original 7.5k human-written solutions were too few for SFT: the model overfit after about two epochs. The val split
+is held out by problem, so none of its solutions are trained on. DART responses mostly end with `The answer is: X`;
+the loader rewrites this as `The answer is $\boxed{X}$.` to match the prompt and the grader. The test set is MATH-500.
+
 The model is a base (pretrained-only) model, which starts at about 32% on MATH-500. The prompt is plain text:
 `Problem: <problem>\nPlease reason step by step, and put your final answer within \boxed{}.\nSolution: `.
 Training uses standard bf16 mixed precision (fp32 weights and AdamW state, bf16 autocast), the same as HF Trainer's
@@ -55,7 +61,7 @@ We use the paper's **batch POMDP** (Sec 2.2, Appendix B), which is the formulati
 |---|---|
 | task *i* | a MATH bucket (`bucket_by`: `level` → 5 tasks, `subject` → 7, `level_subject` → 35) |
 | action *a_t* | a distribution over buckets; the next `teacher_every` optimizer steps sample batches from it |
-| observation *o_t* | per-bucket accuracy (greedy decoding) on a held-out val split carved out of MATH train (`n_val_per_bucket` per bucket) |
+| observation *o_t* | per-bucket accuracy (greedy decoding) on held-out MATH train problems (`n_val_per_bucket` per bucket) |
 | reward *r_t* | score change *o_t − o_{t−1}* (Online, Sampling) or learning-curve slope (Naive, Window) |
 | final task | MATH-500 accuracy (reporting only; the teacher never sees it) |
 

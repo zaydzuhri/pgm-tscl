@@ -268,7 +268,14 @@ def main():
         return [[encoded for encoded in bucket if any(label != -100 for label in encoded["labels"])]
                 for bucket in encoded_buckets]
 
-    train_encoded = encode_buckets(task_data.train)
+    # The training set is too large to tokenize up front, so the sampler tokenizes each example when it is
+    # drawn. Examples whose prompt alone fills max_len are dropped here instead (no solution tokens to train
+    # on; a batch made only of them would give NaN). Prompts are shared by many solutions, so only the unique
+    # problems are tokenized.
+    prompt_lengths = {problem: len(tokenizer(data.format_prompt(problem), add_special_tokens=False).input_ids)
+                      for problem in {example["problem"] for bucket in task_data.train for example in bucket}}
+    train_buckets = [[example for example in bucket if prompt_lengths[example["problem"]] < config.max_len]
+                     for bucket in task_data.train]
     val_encoded = encode_buckets(task_data.val)       # for the validation loss
     test_examples = task_data.test[:config.test_size] if config.test_size else task_data.test
     # All validation examples in one flat list, so observing the scores is one batched generation over
@@ -280,12 +287,13 @@ def main():
     train_acc_examples = [example for bucket in task_data.train for example in bucket[:config.n_train_acc_per_bucket]]
     train_acc_task_ids = np.array([task_id for task_id, bucket in enumerate(task_data.train)
                                    for _ in bucket[:config.n_train_acc_per_bucket]])                       # (N * n_train_acc,)
-    bucket_sizes = [len(bucket) for bucket in train_encoded]
+    bucket_sizes = [len(bucket) for bucket in train_buckets]
     print(f"device={device} buckets={dict(zip(task_data.names, bucket_sizes))} "
           f"val/bucket={config.n_val_per_bucket} test={len(test_examples)}")
 
     # --- Teacher, plus the sampler that turns its distribution into actual batches ---
-    sampler = data.BucketSampler(train_encoded, seed=config.seed)
+    sampler = data.BucketSampler(train_buckets, seed=config.seed,
+                                 encode=lambda example, task_id: data.encode(tokenizer, example, config.max_len, task_id))
     teacher = teachers.make_teacher(config.teacher, num_tasks, bucket_sizes, seed=config.seed, **config.teacher_kwargs)
     use_scores = teacher.needs_scores or config.always_score
 
