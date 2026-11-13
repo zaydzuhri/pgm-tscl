@@ -77,7 +77,7 @@ def boxed_solution(response):
     return response if last_boxed(response) is not None else None
 
 
-def load_math(bucket_by="level", n_val=32, data_seed=0):
+def load_math(bucket_by="level", n_val=32, data_seed=0,subject = None):
     """MATH problems bucketed by level and/or subject; MATH-500 as test set.
 
     Training solutions come from the DART-Math pool (hkust-nlp/dart-math-pool-math): ~1.6M correct solutions
@@ -94,10 +94,43 @@ def load_math(bucket_by="level", n_val=32, data_seed=0):
         row = dict(problem=problem, solution=solution, answer=answer, level=metadata["level"], subject=DART_SUBJECTS[domain])
         solutions_by_problem.setdefault(query_id, []).append(row)
         problem_rows.setdefault(query_id, dict(row, query_id=query_id))   # one row per problem, for the split
+        
     test_rows = [dict(problem=row["problem"], solution=row["solution"], answer=row["answer"],
                       level=int(row["level"]), subject=row["subject"])
                  for row in load_dataset("HuggingFaceH4/MATH-500", split="test")]
-    task_data = split_into_buckets(list(problem_rows.values()), test_rows, bucket_by, n_val, data_seed)
+    # Keep only the selected mathematical subject
+    if subject is not None:
+        valid_subjects = set(DART_SUBJECTS.values())
+
+        if subject not in valid_subjects:
+            raise ValueError(
+                f"Unknown subject: {subject}. "
+                f"Available subjects: {sorted(valid_subjects)}"
+            )
+
+        problem_rows = {
+            query_id: row
+            for query_id, row in problem_rows.items()
+            if row["subject"] == subject
+        }
+
+        test_rows = [
+            row for row in test_rows
+            if row["subject"] == subject
+        ]
+
+        if not problem_rows or not test_rows:
+            raise ValueError(
+                f"No training or test problems found for {subject}"
+            )
+    
+    task_data = split_into_buckets(
+        list(problem_rows.values()),
+        test_rows,
+        bucket_by,
+        n_val,
+        data_seed
+    )    
     # Replace each training problem by all of its solutions, shuffled (so the first examples of a bucket
     # are a random subset, which train.py uses for train accuracy).
     random_generator = random.Random(data_seed)

@@ -56,6 +56,7 @@ class Config:
     model: str = "Qwen/Qwen3-0.6B-Base"
     dataset: str = "math"
     bucket_by: str = "level"            # how to split data into tasks: level | subject | level_subject | none
+    subject: str = ""
     n_val_per_bucket: int = 32          # held-out examples per task; their accuracy is what the Teacher observes
     max_len: int = 2048
     # --- Teacher ---
@@ -257,7 +258,7 @@ def main():
 
     # --- Tasks: training data split into N buckets, plus a val set per bucket and a test set ---
     task_data = data.load_task_data(config.dataset, bucket_by=config.bucket_by,
-                                    n_val=config.n_val_per_bucket, data_seed=config.data_seed)
+                                    n_val=config.n_val_per_bucket, data_seed=config.data_seed,subject=config.subject or None)
     num_tasks = len(task_data.names)
 
     def encode_buckets(buckets):
@@ -368,7 +369,6 @@ def main():
         run_eval()
     if config.val_loss_every:
         run_val_loss()                  # validation loss before any training
-
     # o_0: score every task once before training, so the first reward (a score change) can be computed.
     # The score of task i is the Student's accuracy on that task's validation examples.
     if use_scores:
