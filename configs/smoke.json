@@ -13,6 +13,8 @@
   "val_loss_every": 2,
   "n_train_acc_per_bucket": 2,
   "test_size": 4,
+  "save_model": true,
+  "save_dir": "$SCRATCH/pgm-tscl/models",
   "seed": 0,
   "teacher": "window",
   "teacher_kwargs": {

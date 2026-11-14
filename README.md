@@ -22,6 +22,7 @@ uv sync
 uv run train.py --config configs/sft.json            # ordinary finetuning (baseline)
 uv run train.py --config configs/tscl_window.json    # TSCL, Window teacher
 uv run train.py --config configs/tscl_window.json --seed 1 --teacher_every 20   # CLI flags override the JSON
+uv run train.py --config configs/sft.json --subject "Number Theory"            # one MATH subject only (train, val and test)
 ```
 
 On the Mila cluster, submit through `run_job.sh`, which passes its arguments to `uv run` and keeps the
@@ -44,6 +45,11 @@ Logs go to `runs/<config>_s<seed>/log.jsonl`, with four record types:
 - `eval`: every `eval_every` steps, greedy-decoding accuracy on MATH-500 (overall and per level/subject), on the val
   split (per bucket), and on a fixed subset of the training data (`n_train_acc_per_bucket` per bucket, 0 = skip).
   Train accuracy far above val/test accuracy means the model is fitting its training data rather than generalizing
+
+With `save_model` on (it is in every config), the final model is saved once, at the end of training, in bf16 HF format
+to `<save_dir>/<run name>` (the configs use `"save_dir": "$SCRATCH/pgm-tscl/models"`; environment variables are
+expanded, and an empty `save_dir` means `<out_dir>/model`). Each model is about 1.2 GB. Load it with
+`AutoModelForCausalLM.from_pretrained(path)`.
 
 ## Files
 
@@ -94,5 +100,8 @@ training data used. Note that equal steps does not mean equal tokens: Level 5 so
 | `window` | same as online + `K=10` (FIFO window of scores) |
 | `sampling` | `K=10, epsilon=0.1` |
 
-Boltzmann's `tau` depends on the scale of the scores. The paper's 4e-4 was tuned for accuracy on 4096-example
-validation sets. Our val sets are much smaller, so scores are noisier and `tau` probably needs tuning.
+The greedy policy puts 1 - epsilon + epsilon/N of each batch on the task with the largest |Q| (0.92 with the defaults),
+and epsilon/N on each other task. Boltzmann (`policy="boltzmann"`) uses p ∝ exp(|Q| / tau) instead. `tau` is on the
+scale of Q, i.e. of the score changes. The paper's 4e-4 makes the softmax an argmax for our Q values (~0.01-0.05
+for val accuracy every 50 steps). `tau=0.01` gives a soft mix, e.g. Q = (.019, .006, .022, .016, -.003) ->
+p = (.28, .08, .38, .20, .06). See `configs/tscl_online_boltzmann.json` and `configs/tscl_window_boltzmann.json`.

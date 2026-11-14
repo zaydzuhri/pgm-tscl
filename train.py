@@ -56,6 +56,7 @@ class Config:
     model: str = "Qwen/Qwen3-0.6B-Base"
     dataset: str = "math"
     bucket_by: str = "level"            # how to split data into tasks: level | subject | level_subject | none
+    subject: str = ""                   # train and test on one MATH subject only, e.g. "Number Theory" (empty = all subjects)
     n_val_per_bucket: int = 32          # held-out examples per task; their accuracy is what the Teacher observes
     max_len: int = 2048
     # --- Teacher ---
@@ -83,7 +84,8 @@ class Config:
     seed: int = 0
     data_seed: int = 0                  # fixes the train/val split, so all runs see the same data
     out_dir: str = ""                   # default: runs/<config-name>_s<seed>
-    save_model: bool = False
+    save_model: bool = False            # save the final model (bf16, HF format) to <save_dir>/<run name>
+    save_dir: str = ""                  # default: out_dir. Environment variables are expanded, e.g. "$SCRATCH/pgm-tscl/models"
     wandb_project: str = "pgm-tscl"     # empty string = no wandb logging (log.jsonl is always written)
     wandb_entity: str = ""              # empty = your default wandb entity
 
@@ -109,6 +111,8 @@ def load_config():
     config = Config(**values)
     if not config.out_dir:
         run_name = os.path.splitext(os.path.basename(config_path))[0] if config_path else config.teacher
+        if config.subject:   # e.g. runs/sft_number_theory_s0, so a single-subject run doesn't overwrite the full one
+            run_name += "_" + "_".join(config.subject.lower().replace("&", " ").split())
         config.out_dir = os.path.join("runs", f"{run_name}_s{config.seed}")
     return config
 
@@ -213,6 +217,14 @@ def evaluate_loss(model, tokenizer, encoded_buckets, config, device, autocast):
 def main():
     config = load_config()
     os.makedirs(config.out_dir, exist_ok=True)
+    if config.save_model:
+        # Resolved now rather than after training, so a bad path fails immediately instead of after hours.
+        run_name = os.path.basename(os.path.normpath(config.out_dir))
+        model_path = os.path.join(os.path.expandvars(config.save_dir), run_name) if config.save_dir \
+            else os.path.join(config.out_dir, "model")
+        if "$" in model_path:
+            raise ValueError(f"save_dir has an environment variable that is not set: {config.save_dir}")
+        os.makedirs(model_path, exist_ok=True)
     with open(os.path.join(config.out_dir, "config.json"), "w") as config_file:
         json.dump(dataclasses.asdict(config), config_file, indent=2)
     log_file = open(os.path.join(config.out_dir, "log.jsonl"), "w")   # a re-run of the same config starts a fresh log
@@ -257,7 +269,7 @@ def main():
 
     # --- Tasks: training data split into N buckets, plus a val set per bucket and a test set ---
     task_data = data.load_task_data(config.dataset, bucket_by=config.bucket_by,
-                                    n_val=config.n_val_per_bucket, data_seed=config.data_seed)
+                                    n_val=config.n_val_per_bucket, data_seed=config.data_seed, subject=config.subject or None)
     num_tasks = len(task_data.names)
 
     def encode_buckets(buckets):
@@ -368,7 +380,6 @@ def main():
         run_eval()
     if config.val_loss_every:
         run_val_loss()                  # validation loss before any training
-
     # o_0: score every task once before training, so the first reward (a score change) can be computed.
     # The score of task i is the Student's accuracy on that task's validation examples.
     if use_scores:
@@ -418,8 +429,12 @@ def main():
             task_probs = teacher.distribution()                                 # (N,) sums to 1
 
     if config.save_model:
-        model.save_pretrained(os.path.join(config.out_dir, "model"))
-        tokenizer.save_pretrained(os.path.join(config.out_dir, "model"))
+        # Saved in bf16, the precision evals generate with; it halves the size of the fp32 training weights.
+        # use_cache was switched off for gradient checkpointing; switch it back on so generation from the saved model is fast.
+        model.config.use_cache = True
+        model.to(torch.bfloat16).save_pretrained(model_path)
+        tokenizer.save_pretrained(model_path)
+        print(f"saved the final model to {model_path}")
     log_file.close()
     if wandb_run is not None:
         wandb_run.finish()

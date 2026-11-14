@@ -45,6 +45,8 @@ def split_into_buckets(train_rows, test_rows, bucket_by, n_val, data_seed=0):
     for name in names:
         group = groups[name][:]
         random_generator.shuffle(group)
+        if len(group) <= n_val:   # nothing left to train on for this task; the sampler would fail on it mid-run
+            raise ValueError(f"bucket {name!r} has only {len(group)} problems, not more than n_val={n_val}")
         val.append(group[:n_val])
         train.append(group[n_val:])
     return TaskData(names, train, val, test_rows)
@@ -77,13 +79,16 @@ def boxed_solution(response):
     return response if last_boxed(response) is not None else None
 
 
-def load_math(bucket_by="level", n_val=32, data_seed=0):
+def load_math(bucket_by="level", n_val=32, data_seed=0, subject=None):
     """MATH problems bucketed by level and/or subject; MATH-500 as test set.
 
     Training solutions come from the DART-Math pool (hkust-nlp/dart-math-pool-math): ~1.6M correct solutions
     sampled from DeepSeekMath-7B-RL for the 7.5k MATH train problems, about 200 per problem. The val split is
     made per problem, so no solution of a val problem is ever trained on; each val problem keeps one of its
-    solutions as the target for the validation loss."""
+    solutions as the target for the validation loss.
+
+    subject: if given (a MATH-500 subject name, e.g. "Number Theory"), keep only that subject's problems, for
+    training, val and test alike."""
     pool = load_dataset("hkust-nlp/dart-math-pool-math", split="train")
     columns = {name: pool[name] for name in ("query_id", "query", "resp", "gt_ans", "query_metadata", "domain")}
     solutions_by_problem, problem_rows = {}, {}
@@ -97,6 +102,11 @@ def load_math(bucket_by="level", n_val=32, data_seed=0):
     test_rows = [dict(problem=row["problem"], solution=row["solution"], answer=row["answer"],
                       level=int(row["level"]), subject=row["subject"])
                  for row in load_dataset("HuggingFaceH4/MATH-500", split="test")]
+    if subject is not None:   # keep only the selected subject (train, val and test)
+        if subject not in DART_SUBJECTS.values():
+            raise ValueError(f"unknown subject {subject!r}; available: {sorted(DART_SUBJECTS.values())}")
+        problem_rows = {query_id: row for query_id, row in problem_rows.items() if row["subject"] == subject}
+        test_rows = [row for row in test_rows if row["subject"] == subject]
     task_data = split_into_buckets(list(problem_rows.values()), test_rows, bucket_by, n_val, data_seed)
     # Replace each training problem by all of its solutions, shuffled (so the first examples of a bucket
     # are a random subset, which train.py uses for train accuracy).

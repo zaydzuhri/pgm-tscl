@@ -76,6 +76,7 @@ the same LR schedule and the same test-eval steps. Logs record `examples`, `toke
   - `main`: the loop.
 - `data.py`
   - `load_math`: training solutions from the DART-Math pool (`hkust-nlp/dart-math-pool-math`, ~1.5M DeepSeekMath-7B-RL solutions to the 7.5k MATH train problems, level from `query_metadata.level`, subject from `domain`). The val split is held out per problem (one pool solution each, for the val loss). `boxed_solution` rewrites the DART ending `The answer is: X` as `\boxed{X}`. Test is `HuggingFaceH4/MATH-500`. The human-written solutions (`EleutherAI/hendrycks_math`) were used before 2026-11-11; with only 7.5k of them, SFT overfit after about two epochs and never beat the base model.
+  - `subject` (config): keep only one MATH subject (e.g. `"Number Theory"`) for train, val and test; empty = all subjects. Default run names get the subject appended (`runs/sft_number_theory_s0`).
   - `BucketSampler` takes an `encode` function and tokenizes examples when they are drawn, because the pool is too large to tokenize up front.
   - `split_into_buckets`, `format_prompt`, `encode`, `collate`
   - `BucketSampler`: one shuffled queue per bucket, sampled without replacement and refilled when empty. It tracks `drawn`, `seen` and `refills`.

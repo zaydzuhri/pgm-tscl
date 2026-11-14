@@ -14,7 +14,7 @@
 #SBATCH --gpus-per-task=a100l:1 
 ## Or --gpus-per-task=a100l:1    for an 80GB A100
 ## Or --gpus-per-task=1          for any GPU model (avoid rtx8000/v100: no native bf16)
-#SBATCH --time=12:00:00
+#SBATCH --time=18:00:00
 
 if [ $# -eq 0 ]; then
     echo "usage: sbatch run_job.sh <args for uv run>, e.g. train.py --config configs/sft.json"
